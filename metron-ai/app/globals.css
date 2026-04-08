@@ -1,0 +1,211 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #00668a;
+  --color-primary-container: #38bdf8;
+  --color-secondary: #006e2f;
+  --color-secondary-container: #6bff8f;
+  --color-background: #f7f9fb;
+  --color-surface-container-low: #f2f4f6;
+  --color-surface-container-lowest: #ffffff;
+  --color-on-surface: #191c1e;
+  --color-on-surface-variant: #3e484f;
+  --color-outline: #6e7980;
+  --color-outline-variant: #bdc8d1;
+  --color-error-container: #ffdad6;
+  --color-error: #ba1a1a;
+  
+  --font-headline: "var(--font-manrope)", sans-serif;
+  --font-body: "var(--font-inter)", sans-serif;
+
+  --shadow-card: 0 12px 32px -4px rgba(0, 102, 138, 0.06);
+}
+
+/* Base resets without @apply to avoid build errors */
+body {
+  font-family: var(--font-body);
+  background-color: var(--color-background);
+  color: var(--color-on-surface);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-headline);
+}
+
+/* MetronAI Custom Primary Button */
+.btn-primary {
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-container) 100%);
+  color: white;
+  font-family: var(--font-headline);
+  font-weight: 700;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s ease-in-out;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+}
+
+.btn-primary:hover {
+  opacity: 0.9;
+  filter: brightness(1.1);
+}
+
+.btn-primary:active {
+  transform: scale(0.98);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Material Symbols Rendering Engine */
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 24px;
+  line-height: 1;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-smoothing: antialiased;
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* Animations */
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(107, 255, 143, 0.6); }
+  50%       { box-shadow: 0 0 0 6px rgba(107, 255, 143, 0); }
+}
+
+.pulse-orb {
+  animation: pulse-glow 2s infinite;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.5s ease-out forwards;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Card component */
+.card {
+  background-color: var(--color-surface-container-lowest);
+  border-radius: 1.25rem;
+  border: 1px solid var(--color-outline-variant);
+  box-shadow: var(--shadow-card);
+}
+
+/* Form input field */
+.input-field {
+  width: 100%;
+  padding: 0.625rem 0.875rem;
+  border-radius: 0.625rem;
+  border: 1px solid var(--color-outline-variant);
+  background-color: var(--color-surface-container-low);
+  color: var(--color-on-surface);
+  font-size: 0.875rem;
+  font-family: var(--font-body);
+  transition: border-color 0.15s, box-shadow 0.15s;
+  outline: none;
+}
+
+.input-field:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(0, 102, 138, 0.12);
+}
+
+.input-field::placeholder {
+  color: var(--color-on-surface-variant);
+  opacity: 0.4;
+}
+
+/* Secondary button */
+.btn-secondary {
+  background: transparent;
+  color: var(--color-primary);
+  border: 1.5px solid var(--color-primary);
+  font-family: var(--font-headline);
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease-in-out;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+}
+
+.btn-secondary:hover {
+  background-color: rgba(0, 102, 138, 0.06);
+}
+
+/* Tab underline style */
+.tab-btn {
+  padding: 0.625rem 1.25rem;
+  font-size: 0.875rem;
+  font-weight: 700;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s;
+  color: var(--color-on-surface-variant);
+  white-space: nowrap;
+}
+
+.tab-btn.active {
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary);
+}
+
+.tab-btn:hover:not(.active) {
+  color: var(--color-on-surface);
+  background-color: var(--color-surface-container-low);
+}
+
+/* Score badge colours */
+.badge-pass {
+  background-color: rgba(0, 110, 47, 0.12);
+  color: var(--color-secondary);
+}
+
+.badge-fail {
+  background-color: rgba(186, 26, 26, 0.12);
+  color: var(--color-error);
+}
+
+.badge-warn {
+  background-color: rgba(133, 83, 0, 0.12);
+  color: var(--color-tertiary, #855300);
+}
+
+/* Progress bar */
+.progress-bar-track {
+  height: 6px;
+  border-radius: 9999px;
+  background-color: var(--color-outline-variant);
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, var(--color-primary), var(--color-primary-container));
+  transition: width 0.4s ease;
+}

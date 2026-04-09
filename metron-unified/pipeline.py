@@ -7,6 +7,7 @@ and handles the full lifecycle from AppProfile → AggregatedReport.
 from __future__ import annotations
 import asyncio
 import uuid
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.llm_client import LLMClient
@@ -35,6 +36,17 @@ from stages.s7_report.report_generator import report_to_json, generate_html_repo
 
 
 # ── Progress helpers ───────────────────────────────────────────────────────
+
+def _log(job_store: Dict, run_id: str, event_type: str, content: Dict):
+    """Append a rich log event to the job's event stream for the live feed UI."""
+    if run_id not in job_store:
+        return
+    job_store[run_id].setdefault("log_events", []).append({
+        "type": event_type,
+        "ts": datetime.utcnow().strftime("%H:%M:%S"),
+        "content": content,
+    })
+
 
 def _update(job_store: Dict, run_id: str, progress: int, message: str, phase: str = "", phase_data: Dict = {}):
     if run_id in job_store:
@@ -82,6 +94,7 @@ async def run_pipeline(
 
         # ── Stage 1: Persona Generation (Fishbone) ─────────────────────────
         _update(job_store, run_id, 10, "Building persona coverage matrix…", "personas")
+        _log(job_store, run_id, "phase_start", {"phase": "personas", "label": "Persona Generation"})
         slots = build_slots(profile, num_personas=config.num_personas)
         personas = await build_all_personas(slots, profile, llm_client, project_id)
 
@@ -91,11 +104,23 @@ async def run_pipeline(
             extra_personas = await build_all_personas(extra_slots, profile, llm_client, project_id)
             personas.extend(extra_personas)
 
+        # Emit one event per persona
+        for p in personas:
+            _log(job_store, run_id, "persona_created", {
+                "name": p.name,
+                "intent": p.intent.value,
+                "expertise": p.expertise.value,
+                "emotional_state": p.emotional_state.value,
+                "goal": p.goal[:120] if p.goal else "",
+                "user_type": p.user_type,
+            })
+
         _update(job_store, run_id, 18, f"Generated {len(personas)} personas", "personas",
                 {"count": len(personas), "names": [p.name for p in personas]})
 
         # ── Stage 2: Domain-Specific Test Generation ───────────────────────
         _update(job_store, run_id, 20, "Generating domain-specific test prompts…", "test_gen")
+        _log(job_store, run_id, "phase_start", {"phase": "test_gen", "label": "Test Generation"})
 
         # 2a: Functional prompts
         func_prompts = await generate_all_functional(personas, profile, llm_client)
@@ -111,13 +136,40 @@ async def run_pipeline(
         quality_criteria = await generate_quality_criteria(profile, llm_client)
 
         all_prompts = func_prompts + sec_prompts
+
+        # Log sample prompts (first 3 functional, first 2 security)
+        for fp in func_prompts[:3]:
+            persona_name = next((p.name for p in personas if p.persona_id == fp.persona_id), "Unknown")
+            _log(job_store, run_id, "test_prompt", {
+                "test_class": "functional",
+                "persona_name": persona_name,
+                "text": fp.text[:200],
+                "expected_behavior": (fp.expected_behavior or "")[:120],
+            })
+        for sp in sec_prompts[:2]:
+            persona_name = next((p.name for p in personas if p.persona_id == sp.persona_id), "Unknown")
+            _log(job_store, run_id, "test_prompt", {
+                "test_class": "security",
+                "persona_name": persona_name,
+                "text": sp.text[:200],
+                "attack_category": sp.attack_category or "",
+                "severity": sp.severity or "medium",
+            })
+
+        if quality_criteria and quality_criteria.get("criteria"):
+            _log(job_store, run_id, "quality_criteria", {
+                "domain": profile.domain,
+                "criteria": [c.get("name", "") for c in quality_criteria["criteria"][:6]],
+            })
+
         _update(job_store, run_id, 25, f"Generated {len(all_prompts)} test prompts", "test_gen",
                 {"functional": len(func_prompts), "security": len(sec_prompts)})
 
         # ── Stage 3+4: Execution + Evaluation (interleaved) ────────────────
         _update(job_store, run_id, 28, "Running conversations with target AI…", "execution")
+        _log(job_store, run_id, "phase_start", {"phase": "execution", "label": "Running Conversations"})
 
-        # Progress callback for live updates
+        # Progress callback for live updates — emits conversation feed events
         completed_convs: List[Conversation] = []
         def on_conv(done: int, total: int, conv: Conversation):
             progress = 28 + int((done / total) * 30)   # 28-58%
@@ -125,6 +177,18 @@ async def run_pipeline(
             _update(job_store, run_id, progress,
                     f"Executing {phase} test {done}/{total}…", "execution")
             completed_convs.append(conv)
+            # Emit every conversation so user sees live Q&A
+            last_turn = conv.turns[-1] if conv.turns else None
+            _log(job_store, run_id, "conversation", {
+                "persona_name": conv.persona_name,
+                "test_class": phase,
+                "query": last_turn.query[:250] if last_turn else "",
+                "response": last_turn.response[:350] if last_turn else "",
+                "latency_ms": round(conv.total_latency_ms),
+                "num_turns": len(conv.turns),
+                "done": done,
+                "total": total,
+            })
 
         conversations = await run_all_conversations(
             personas, all_prompts, config, llm_client, project_id,
@@ -133,6 +197,7 @@ async def run_pipeline(
 
         # Stage 4: All evaluations in parallel
         _update(job_store, run_id, 58, "Evaluating results (functional + security + quality in parallel)…", "functional")
+        _log(job_store, run_id, "phase_start", {"phase": "evaluation", "label": "Evaluating Results"})
         func_results, sec_results, qual_results = await asyncio.gather(
             evaluate_functional(conversations, personas, config, llm_client, quality_criteria),
             evaluate_security(conversations, personas, config, llm_client),
@@ -140,6 +205,30 @@ async def run_pipeline(
         )
 
         all_metric_results = func_results + sec_results + qual_results
+
+        # Emit top failures + passes for each phase (sample of 4 each)
+        for phase_label, results in [("functional", func_results), ("security", sec_results), ("quality", qual_results)]:
+            if not results:
+                continue
+            passed_count = sum(1 for r in results if r.passed)
+            avg = round(sum(r.score for r in results) / len(results) * 100, 1) if results else 0
+            samples = sorted(results, key=lambda r: r.score)[:4]
+            _log(job_store, run_id, "eval_batch", {
+                "phase": phase_label,
+                "total": len(results),
+                "passed": passed_count,
+                "avg_score": avg,
+                "samples": [
+                    {
+                        "metric_name": r.metric_name.replace("_", " ").title(),
+                        "persona_name": r.persona_name,
+                        "score": round(r.score * 100),
+                        "passed": r.passed,
+                        "reason": (r.reason or "")[:120],
+                    }
+                    for r in samples
+                ],
+            })
 
         # Update phase results for live UI polling
         _update(job_store, run_id, 72, "Functional + Security + Quality evaluated",
@@ -151,13 +240,34 @@ async def run_pipeline(
 
         # Stage 4: Performance evaluation
         _update(job_store, run_id, 75, "Running performance tests…", "performance")
+        _log(job_store, run_id, "phase_start", {"phase": "performance", "label": "Performance Tests"})
         perf_metrics = await evaluate_performance(config, run_id=run_id)
+        _log(job_store, run_id, "perf_complete", {
+            "avg_latency_ms": round(perf_metrics.get("avg_latency_ms", 0)),
+            "p95_latency_ms": round(perf_metrics.get("p95_latency_ms", 0)),
+            "p99_latency_ms": round(perf_metrics.get("p99_latency_ms", 0)),
+            "error_rate": round(perf_metrics.get("error_rate", 0), 1),
+            "throughput_rps": round(perf_metrics.get("throughput_rps", 0), 2),
+            "total_requests": perf_metrics.get("total_requests", 0),
+            "successful": perf_metrics.get("successful", 0),
+        })
         _update(job_store, run_id, 82, f"Performance: p95={perf_metrics.get('p95_latency_ms', 0):.0f}ms",
                 "performance", perf_metrics)
 
         # Stage 4: Load evaluation
         _update(job_store, run_id, 84, f"Running load test ({config.load_concurrent_users} concurrent users)…", "load")
+        _log(job_store, run_id, "phase_start", {"phase": "load", "label": f"Load Test — {config.load_concurrent_users} concurrent users"})
         load_metrics = await evaluate_load(config)
+        _log(job_store, run_id, "load_complete", {
+            "concurrent_users": load_metrics.get("concurrent_users", 0),
+            "total_requests": load_metrics.get("total_requests", 0),
+            "successful": load_metrics.get("successful", 0),
+            "error_rate": round(load_metrics.get("error_rate", 0), 1),
+            "avg_latency_ms": round(load_metrics.get("avg_latency_ms", 0)),
+            "p95_latency_ms": round(load_metrics.get("p95_latency_ms", 0)),
+            "requests_per_second": round(load_metrics.get("requests_per_second", 0), 2),
+            "assessment": load_metrics.get("assessment", ""),
+        })
         _update(job_store, run_id, 89, f"Load: {load_metrics.get('requests_per_second', 0):.1f} RPS",
                 "load", load_metrics)
 
@@ -177,6 +287,7 @@ async def run_pipeline(
         # ── Stage 6: Feedback Loop ─────────────────────────────────────────
         if config.enable_feedback_loop:
             _update(job_store, run_id, 90, "Running adaptive feedback loop…", "feedback")
+            _log(job_store, run_id, "phase_start", {"phase": "feedback", "label": "Adaptive Feedback Loop"})
 
             async def _run_stages_on_new_slots(
                 new_slots: List[Dict], profile: AppProfile,
@@ -206,18 +317,29 @@ async def run_pipeline(
                 progress_callback=fb_progress,
             )
             new_personas_added = len(personas) - original_persona_count
+            effective = sum(1 for pb in report.persona_breakdown if hasattr(pb, "pass_rate") and pb.pass_rate < 50)
+            _log(job_store, run_id, "feedback_complete", {
+                "new_personas_count": new_personas_added,
+                "effective_personas": effective,
+                "new_persona_names": [p.name for p in personas[original_persona_count:]],
+            })
             _update(job_store, run_id, 97, "Feedback loop complete", "feedback", {
                 "new_personas_count": new_personas_added,
-                "effective_personas": sum(
-                    1 for pb in report.persona_breakdown
-                    if hasattr(pb, "pass_rate") and pb.pass_rate < 50
-                ),
+                "effective_personas": effective,
             })
 
         # ── Stage 7: Report Generation ─────────────────────────────────────
         _update(job_store, run_id, 97, "Generating report…", "report")
+        _log(job_store, run_id, "phase_start", {"phase": "report", "label": "Generating Report"})
         report.report_html = generate_html_report(report)
         final_json = report_to_json(report)
+        _log(job_store, run_id, "pipeline_complete", {
+            "health_score": round(report.health_score * 100, 1),
+            "passed": report.passed,
+            "total_tests": report.total_tests,
+            "total_passed": report.total_passed,
+            "domain": report.domain,
+        })
         _update(job_store, run_id, 99, "Report ready", "report", {"generated": True})
 
         # ── Flatten test_classes to top-level for UI compatibility ───────────

@@ -212,6 +212,7 @@ async def run_tests(
         "message":      "Queued",
         "current_phase": "",
         "phase_results": {},
+        "log_events":   [],
         "error":        None,
         "results":      None,
     }
@@ -243,6 +244,7 @@ async def get_job_status(run_id: str):
         "message":       job["message"],
         "current_phase": job["current_phase"],
         "phase_results": job["phase_results"],
+        "log_events":    job.get("log_events", []),
         "error":         job["error"],
     }
 

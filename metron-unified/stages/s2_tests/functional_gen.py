@@ -182,10 +182,12 @@ async def generate_all_functional(
     profile: AppProfile,
     llm_client: LLMClient,
 ) -> List[GeneratedPrompt]:
-    """Generate functional prompts for all personas."""
-    all_prompts: List[GeneratedPrompt] = []
-    for persona in personas:
-        prompts = await generate_functional_prompts(persona, profile, llm_client)
-        all_prompts.extend(prompts)
-        await asyncio.sleep(0.3)
-    return all_prompts
+    """Generate functional prompts for all personas in parallel."""
+    sem = asyncio.Semaphore(5)
+
+    async def _bounded(persona):
+        async with sem:
+            return await generate_functional_prompts(persona, profile, llm_client)
+
+    batches = await asyncio.gather(*[_bounded(p) for p in personas])
+    return [prompt for batch in batches for prompt in batch]

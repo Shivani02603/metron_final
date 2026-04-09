@@ -31,10 +31,10 @@ LLM_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "default": "azure/gpt-4o",
         "env_key": "AZURE_OPENAI_API_KEY",
         "endpoint_key": "AZURE_OPENAI_ENDPOINT",
-        "rpm": 60,
-        "tpm": 10000,
-        "description": "Azure GPT-4o | 60 RPM | 10K TPM strict",
-        "token_optimize": True,   # compact prompts mandatory
+        "rpm": 300,
+        "tpm": 49000,
+        "description": "Azure GPT-4o | 300 RPM | 49K TPM",
+        "token_optimize": True,   # compact prompts — stay within 49K TPM
     },
     "Groq": {
         "prefix": "groq",
@@ -71,7 +71,7 @@ FALLBACK_CHAIN = [
 ]
 
 # ── Token budgets ──────────────────────────────────────────────────────────
-TOKEN_BUDGET_COMPACT = 800    # Azure: stay within 10K TPM
+TOKEN_BUDGET_COMPACT = 1200   # Azure: balanced quality within 49K TPM
 TOKEN_BUDGET_NORMAL  = 1500   # Free tiers
 TOKEN_BUDGET_LARGE   = 4000   # Persona generation (detailed JSON output)
 

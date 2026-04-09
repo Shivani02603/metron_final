@@ -239,16 +239,21 @@ async def run_all_conversations(
         2
     ))
 
-    conversations: List[Conversation] = []
     total = len(ordered)
-    for i, prompt in enumerate(ordered):
+    completed = 0
+    sem = asyncio.Semaphore(5)  # max 3 concurrent conversations
+
+    async def _run_one(prompt):
+        nonlocal completed
         persona = persona_map.get(prompt.persona_id)
         if not persona:
-            continue
-        conv = await run_conversation(persona, prompt, config, llm_client, project_id)
-        conversations.append(conv)
+            return None
+        async with sem:
+            conv = await run_conversation(persona, prompt, config, llm_client, project_id)
+        completed += 1
         if progress_callback:
-            progress_callback(i + 1, total, conv)
-        await asyncio.sleep(0.1)
+            progress_callback(completed, total, conv)
+        return conv
 
-    return conversations
+    raw = await asyncio.gather(*[_run_one(p) for p in ordered])
+    return [c for c in raw if c is not None]

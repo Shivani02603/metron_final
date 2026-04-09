@@ -168,7 +168,13 @@ class LLMClient:
             kwargs["api_base"] = "https://integrate.api.nvidia.com/v1"
         elif prefix == "azure":
             kwargs["api_key"] = self.api_key or os.environ.get("AZURE_OPENAI_API_KEY", "")
-            kwargs["api_base"] = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+            # Strip everything after the hostname — litellm needs only the base URL
+            raw_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+            if raw_endpoint:
+                from urllib.parse import urlparse
+                parsed = urlparse(raw_endpoint)
+                kwargs["api_base"] = f"{parsed.scheme}://{parsed.netloc}/"
+            kwargs["api_version"] = os.environ.get("AZURE_API_VERSION", "2025-01-01-preview")
         elif prefix == "groq":
             kwargs["api_key"] = self.api_key if "groq" in self.provider_name.lower() else os.environ.get("GROQ_API_KEY", "")
         elif prefix == "gemini":

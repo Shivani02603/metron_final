@@ -22,20 +22,19 @@ QUESTION: {question}
 AI RESPONSE: {response}
 EXPECTED BEHAVIOR: {expected}
 
-Rate the response from 0.0 to 1.0 on:
-1. Relevance: Does it directly address the question?
-2. Accuracy: Is the information correct?
-3. Helpfulness: Does it help the user achieve their goal?
+Rate the response from 0.0 to 1.0 on each criterion below:
+{criteria_text}
 
-Return JSON:
+Return JSON where each key is the criterion name (lowercase, underscores) and value is 0.0-1.0, plus:
 {{
-  "relevance": <0.0-1.0>,
-  "accuracy": <0.0-1.0>,
-  "helpfulness": <0.0-1.0>,
-  "overall": <average of the three>,
+  "<criterion_1>": <0.0-1.0>,
+  "<criterion_2>": <0.0-1.0>,
+  "overall": <average of all criteria>,
   "reasoning": "<1-2 sentences>"
 }}
 """
+
+_DEFAULT_CRITERIA_TEXT = "- Relevance: Does it directly address the question?\n- Accuracy: Is the information correct?\n- Helpfulness: Does it help the user achieve their goal?"
 
 
 async def evaluate_functional(
@@ -51,26 +50,35 @@ async def evaluate_functional(
     persona_map = {p.persona_id: p for p in personas}
     results: List[MetricResult] = []
 
-    for conv in func_convs:
+    # Build criteria text once from quality_criteria (domain-specific) or fallback
+    if quality_criteria and quality_criteria.get("criteria"):
+        criteria_lines = [
+            f"- {c['name']}: {c.get('description', '')}"
+            for c in quality_criteria["criteria"]
+        ]
+        criteria_text = "\n".join(criteria_lines)
+        pass_threshold = quality_criteria.get("passing_threshold", THRESHOLDS["functional_pass"])
+    else:
+        criteria_text = _DEFAULT_CRITERIA_TEXT
+        pass_threshold = THRESHOLDS["functional_pass"]
+
+    sem = asyncio.Semaphore(5)
+
+    async def _eval_one(conv):
         persona = persona_map.get(conv.persona_id)
         if not conv.turns:
-            continue
-
-        # Use last turn for evaluation (most informative)
+            return []
         last_turn = conv.turns[-1]
         query    = last_turn.query
         response = last_turn.response
         context  = last_turn.retrieved_context or []
         latency  = conv.total_latency_ms
-
         fishbone = persona.fishbone_dimensions if persona else {}
         intent   = persona.intent.value if persona else "genuine"
-        pname    = conv.persona_name
-
         base_meta = dict(
             conversation_id=conv.conversation_id,
             persona_id=conv.persona_id,
-            persona_name=pname,
+            persona_name=conv.persona_name,
             intent=intent,
             fishbone=fishbone,
             prompt=query,
@@ -78,57 +86,59 @@ async def evaluate_functional(
             latency_ms=latency,
             superset="functional",
         )
+        local = []
 
-        # ── ROUGE-L ─────────────────────────────────────────────────────────
         rouge_score = _rouge_l(query, response)
-        results.append(MetricResult(
-            **base_meta,
-            metric_name="rouge_l",
-            score=rouge_score,
+        local.append(MetricResult(
+            **base_meta, metric_name="rouge_l", score=rouge_score,
             passed=rouge_score >= THRESHOLDS["rouge_l_min"],
             reason=f"ROUGE-L F1: {rouge_score:.3f}",
         ))
 
-        # ── BERTScore ────────────────────────────────────────────────────────
         bert_score = _bert_score_approx(query, response)
-        results.append(MetricResult(
-            **base_meta,
-            metric_name="bert_score_f1",
-            score=bert_score,
+        local.append(MetricResult(
+            **base_meta, metric_name="bert_score_f1", score=bert_score,
             passed=bert_score >= THRESHOLDS["bert_score_min"],
             reason=f"BERTScore F1 (approx): {bert_score:.3f}",
         ))
 
-        # ── DeepEval / LLM judge ─────────────────────────────────────────────
-        judge_result = await _llm_judge(query, response, "", llm_client)
-        results.append(MetricResult(
-            **base_meta,
-            metric_name="answer_relevancy",
-            score=judge_result["relevance"],
-            passed=judge_result["relevance"] >= THRESHOLDS["functional_pass"],
-            reason=judge_result["reasoning"],
-        ))
-        results.append(MetricResult(
-            **base_meta,
-            metric_name="helpfulness",
-            score=judge_result["helpfulness"],
-            passed=judge_result["helpfulness"] >= THRESHOLDS["functional_pass"],
-            reason=judge_result["reasoning"],
+        async with sem:
+            judge_result = await _llm_judge(query, response, "", llm_client, criteria_text)
+        overall = judge_result.get("overall", 0.5)
+        reasoning = judge_result.get("reasoning", "")
+        # Emit one result per criterion returned by the judge
+        skip_keys = {"overall", "reasoning"}
+        for crit_key, crit_score in judge_result.items():
+            if crit_key in skip_keys:
+                continue
+            try:
+                s = float(crit_score)
+            except (TypeError, ValueError):
+                continue
+            local.append(MetricResult(
+                **base_meta, metric_name=crit_key, score=s,
+                passed=s >= pass_threshold, reason=reasoning,
+            ))
+        # Always emit overall as answer_relevancy for backward compat
+        local.append(MetricResult(
+            **base_meta, metric_name="answer_relevancy", score=overall,
+            passed=overall >= pass_threshold, reason=reasoning,
         ))
 
-        # ── RAG-specific: RAGAS faithfulness ─────────────────────────────────
         if context and config.application_type == ApplicationType.RAG:
-            faith = await _faithfulness(query, response, context, llm_client)
-            results.append(MetricResult(
-                **base_meta,
-                metric_name="faithfulness",
-                score=faith,
+            async with sem:
+                faith = await _faithfulness(query, response, context, llm_client)
+            local.append(MetricResult(
+                **base_meta, metric_name="faithfulness", score=faith,
                 passed=faith >= THRESHOLDS["functional_pass"],
                 reason=f"Faithfulness to retrieved context: {faith:.3f}",
             ))
 
-        await asyncio.sleep(0.1)
+        return local
 
+    batches = await asyncio.gather(*[_eval_one(c) for c in func_convs])
+    for batch in batches:
+        results.extend(batch)
     return results
 
 
@@ -193,25 +203,34 @@ async def _llm_judge(
     response: str,
     expected: str,
     llm_client: LLMClient,
+    criteria_text: str = _DEFAULT_CRITERIA_TEXT,
 ) -> dict:
-    """LLM-as-judge for relevance, accuracy, helpfulness."""
+    """LLM-as-judge using domain-specific or default criteria."""
     prompt = LLM_JUDGE_PROMPT.format(
         question=question[:400],
         response=response[:600],
         expected=expected[:200] or "A helpful, accurate response",
+        criteria_text=criteria_text,
     )
     try:
         data = await llm_client.complete_json(
-            prompt, temperature=0.1, max_tokens=400, task="judge", retries=2,
+            prompt, temperature=0.1, max_tokens=500, task="judge", retries=2,
         )
-        return {
-            "relevance":   float(data.get("relevance", 0.5)),
-            "accuracy":    float(data.get("accuracy", 0.5)),
-            "helpfulness": float(data.get("helpfulness", 0.5)),
-            "reasoning":   data.get("reasoning", ""),
-        }
+        # Normalise: ensure float values, preserve all criterion keys
+        result = {}
+        for k, v in data.items():
+            if k == "reasoning":
+                result[k] = str(v)
+            else:
+                try:
+                    result[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
+        result.setdefault("overall", 0.5)
+        result.setdefault("reasoning", "")
+        return result
     except Exception:
-        return {"relevance": 0.5, "accuracy": 0.5, "helpfulness": 0.5, "reasoning": "Judge unavailable"}
+        return {"overall": 0.5, "reasoning": "Judge unavailable"}
 
 
 async def _faithfulness(

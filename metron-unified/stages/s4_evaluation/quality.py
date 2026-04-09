@@ -47,16 +47,21 @@ async def evaluate_quality(
     persona_map = {p.persona_id: p for p in personas}
     results: List[MetricResult] = []
 
-    # Use all conversations (functional + security give us quality signals too)
-    for conv in conversations:
-        if not conv.turns:
-            continue
+    # Pre-compute criteria text once
+    criteria_text = None
+    if quality_criteria and llm_client:
+        from stages.s2_tests.quality_criteria import criteria_to_geval_string
+        criteria_text = criteria_to_geval_string(quality_criteria)
 
+    sem = asyncio.Semaphore(5)
+
+    async def _eval_one(conv):
+        if not conv.turns:
+            return []
         last_turn = conv.turns[-1]
         persona = persona_map.get(conv.persona_id)
         fishbone = persona.fishbone_dimensions if persona else {}
         intent = persona.intent.value if persona else "genuine"
-
         base_meta = dict(
             conversation_id=conv.conversation_id,
             persona_id=conv.persona_id,
@@ -68,29 +73,27 @@ async def evaluate_quality(
             latency_ms=conv.total_latency_ms,
             superset="quality",
         )
+        local = []
 
-        # ── G-Eval with domain-specific criteria ──────────────────────────
-        if quality_criteria and llm_client:
-            from stages.s2_tests.quality_criteria import criteria_to_geval_string
-            criteria_text = criteria_to_geval_string(quality_criteria)
-            geval_result = await _geval(
-                question=last_turn.query,
-                response=last_turn.response,
-                criteria_text=criteria_text,
-                criteria=quality_criteria.get("criteria", []),
-                llm_client=llm_client,
-            )
+        if criteria_text and quality_criteria:
+            async with sem:
+                geval_result = await _geval(
+                    question=last_turn.query,
+                    response=last_turn.response,
+                    criteria_text=criteria_text,
+                    criteria=quality_criteria.get("criteria", []),
+                    llm_client=llm_client,
+                )
+            threshold = quality_criteria.get("passing_threshold", THRESHOLDS["quality_pass"])
             for criterion_name, score in geval_result["scores"].items():
-                threshold = quality_criteria.get("passing_threshold", THRESHOLDS["quality_pass"])
-                results.append(MetricResult(
+                local.append(MetricResult(
                     **base_meta,
                     metric_name=f"geval_{criterion_name.lower().replace(' ', '_')}",
                     score=float(score),
                     passed=float(score) >= threshold,
                     reason=geval_result["reasoning"],
                 ))
-            # Overall G-Eval score
-            results.append(MetricResult(
+            local.append(MetricResult(
                 **base_meta,
                 metric_name="geval_overall",
                 score=geval_result["overall"],
@@ -98,13 +101,13 @@ async def evaluate_quality(
                 reason=geval_result["reasoning"],
             ))
 
-        # ── RAGAS for RAG mode ─────────────────────────────────────────────
         if config.application_type == ApplicationType.RAG and last_turn.retrieved_context:
-            context = last_turn.retrieved_context or []
-            faith = await _ragas_faithfulness(
-                last_turn.query, last_turn.response, context, config.rag_text, llm_client,
-            )
-            results.append(MetricResult(
+            async with sem:
+                faith = await _ragas_faithfulness(
+                    last_turn.query, last_turn.response,
+                    last_turn.retrieved_context, config.rag_text, llm_client,
+                )
+            local.append(MetricResult(
                 **base_meta,
                 metric_name="ragas_faithfulness",
                 score=faith,
@@ -112,8 +115,11 @@ async def evaluate_quality(
                 reason=f"Faithfulness to ground truth: {faith:.3f}",
             ))
 
-        await asyncio.sleep(0.1)
+        return local
 
+    batches = await asyncio.gather(*[_eval_one(c) for c in conversations])
+    for batch in batches:
+        results.extend(batch)
     return results
 
 

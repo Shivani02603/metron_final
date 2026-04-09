@@ -171,13 +171,14 @@ async def build_all_personas(
     llm_client: LLMClient,
     project_id: str = "",
 ) -> List[Persona]:
-    """Build personas for all slots sequentially (respects rate limits)."""
-    personas: List[Persona] = []
-    for slot in slots:
-        persona = await build_persona(slot, profile, llm_client, project_id)
-        personas.append(persona)
-        await asyncio.sleep(0.5)   # small gap to avoid burst
-    return personas
+    """Build all personas in parallel (semaphore limits concurrency to respect rate limits)."""
+    sem = asyncio.Semaphore(5)
+
+    async def _bounded(slot):
+        async with sem:
+            return await build_persona(slot, profile, llm_client, project_id)
+
+    return list(await asyncio.gather(*[_bounded(s) for s in slots]))
 
 
 def _fallback_persona(slot: Dict[str, str], profile: AppProfile, project_id: str) -> Persona:

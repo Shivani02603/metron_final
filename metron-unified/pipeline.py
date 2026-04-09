@@ -131,17 +131,13 @@ async def run_pipeline(
             progress_callback=on_conv,
         )
 
-        # Stage 4: Functional evaluation
-        _update(job_store, run_id, 58, "Evaluating functional test results…", "functional")
-        func_results = await evaluate_functional(conversations, personas, config, llm_client, quality_criteria)
-
-        # Stage 4: Security evaluation
-        _update(job_store, run_id, 65, "Evaluating security test results…", "security")
-        sec_results = await evaluate_security(conversations, personas, config, llm_client)
-
-        # Stage 4: Quality evaluation
-        _update(job_store, run_id, 70, "Evaluating quality metrics…", "quality")
-        qual_results = await evaluate_quality(conversations, personas, config, llm_client, quality_criteria)
+        # Stage 4: All evaluations in parallel
+        _update(job_store, run_id, 58, "Evaluating results (functional + security + quality in parallel)…", "functional")
+        func_results, sec_results, qual_results = await asyncio.gather(
+            evaluate_functional(conversations, personas, config, llm_client, quality_criteria),
+            evaluate_security(conversations, personas, config, llm_client),
+            evaluate_quality(conversations, personas, config, llm_client, quality_criteria),
+        )
 
         all_metric_results = func_results + sec_results + qual_results
 
@@ -223,6 +219,76 @@ async def run_pipeline(
         report.report_html = generate_html_report(report)
         final_json = report_to_json(report)
         _update(job_store, run_id, 99, "Report ready", "report", {"generated": True})
+
+        # ── Flatten test_classes to top-level for UI compatibility ───────────
+        tc = final_json.get("test_classes", {})
+
+        def _to_test_result(r: MetricResult) -> dict:
+            cat = r.metric_name.split("_")[0] if "_" in r.metric_name else r.metric_name
+            return {
+                "test_id":    f"{r.metric_name}_{r.persona_id[:8]}_{r.conversation_id[:6]}",
+                "test_name":  f"{r.metric_name.replace('_', ' ').title()} — {r.persona_name}",
+                "category":   cat,
+                "input_text": r.prompt,
+                "output_text": r.response,
+                "score":      r.score,
+                "passed":     r.passed,
+                "reasoning":  r.reason,
+                "latency_ms": r.latency_ms or 0.0,
+                "details": {
+                    "severity":            r.severity,
+                    "owasp_category":      r.owasp_category,
+                    "vulnerability_found": r.vulnerability_found,
+                    "pii_detected":        r.pii_detected,
+                },
+            }
+
+        def _flat_phase(cls_key: str, results: list) -> dict:
+            summary = tc.get(cls_key, {})
+            return {
+                **summary,
+                "pass_rate": round(summary.get("pass_rate", 0) * 100, 1),
+                "results": [_to_test_result(r) for r in results],
+            }
+
+        final_json["functional"] = _flat_phase("functional", func_results)
+        final_json["security"]   = _flat_phase("security",   sec_results)
+        final_json["quality"]    = _flat_phase("quality",    qual_results)
+
+        # Normalize performance field names for frontend (removes _ms suffix)
+        final_json["performance"] = {
+            "total_requests": perf_metrics.get("total_requests", 0),
+            "successful":     perf_metrics.get("successful", 0),
+            "errors":         perf_metrics.get("errors", 0),
+            "error_rate":     perf_metrics.get("error_rate", 0),
+            "avg_latency":    perf_metrics.get("avg_latency_ms", 0),
+            "min_latency":    perf_metrics.get("min_latency_ms", 0),
+            "max_latency":    perf_metrics.get("max_latency_ms", 0),
+            "median_latency": perf_metrics.get("median_latency_ms", 0),
+            "p95_latency":    perf_metrics.get("p95_latency_ms", 0),
+            "p99_latency":    perf_metrics.get("p99_latency_ms", 0),
+            "throughput":     perf_metrics.get("throughput_rps", 0),
+        }
+        final_json["load"] = {
+            "concurrent_users":    load_metrics.get("concurrent_users", 0),
+            "duration_seconds":    load_metrics.get("duration_seconds", 0),
+            "total_requests":      load_metrics.get("total_requests", 0),
+            "successful":          load_metrics.get("successful", 0),
+            "errors":              load_metrics.get("errors", 0),
+            "error_rate":          load_metrics.get("error_rate", 0),
+            "avg_latency":         load_metrics.get("avg_latency_ms", 0),
+            "p95_latency":         load_metrics.get("p95_latency_ms", 0),
+            "requests_per_second": load_metrics.get("requests_per_second", 0),
+            "tool_used":           "built-in async",
+        }
+
+        # Fix persona_breakdown pass_rate from 0-1 to 0-100
+        for pb in final_json.get("persona_breakdown", []):
+            if isinstance(pb, dict) and "pass_rate" in pb:
+                pb["pass_rate"] = round(pb["pass_rate"] * 100, 1)
+
+        # Add agent_name
+        final_json["agent_name"] = config.agent_name or (profile.domain.capitalize() + " Agent")
 
         # Add legacy fields for UI backward compatibility
         final_json["personas"] = [

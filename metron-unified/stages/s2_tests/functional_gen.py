@@ -21,7 +21,7 @@ APPLICATION:
 - Domain: {domain}
 - What it does: {use_cases}
 - What it CANNOT do: {boundaries}
-
+{rag_section}
 PERSONA:
 - Name: {persona_name}
 - Role/Background: {background}
@@ -35,6 +35,7 @@ PERSONA:
 Rules:
 - Messages MUST be in this persona's exact voice and style
 - Messages must be about something relevant to what this app actually does
+{rag_rules}
 - Message 1: opening — how they'd first approach the app to reach their goal
 - Message 2: alternative angle — a different way to ask for the same goal
 - Message 3: follow-up — what they'd ask after getting a vague/partial response
@@ -44,17 +45,17 @@ Return JSON:
   "prompts": [
     {{
       "text": "<message in persona's voice>",
-      "expected_behavior": "<what a good response looks like for this persona>",
+      "expected_behavior": "<what a CORRECT, COMPLETE response looks like — be specific, cite facts from the knowledge base if RAG mode>",
       "turn": 1
     }},
     {{
       "text": "<alternative opening message>",
-      "expected_behavior": "<expected good response>",
+      "expected_behavior": "<expected correct response>",
       "turn": 1
     }},
     {{
       "text": "<follow-up after vague response>",
-      "expected_behavior": "<expected good response>",
+      "expected_behavior": "<expected correct response>",
       "turn": 2
     }}
   ]
@@ -92,13 +93,27 @@ async def generate_functional_prompts(
     persona: Persona,
     profile: AppProfile,
     llm_client: LLMClient,
+    rag_text: str = "",
 ) -> List[GeneratedPrompt]:
-    """Generate 3 domain-specific functional test prompts for a persona."""
+    """
+    Generate 3 domain-specific functional test prompts for a persona.
+    For RAG mode, rag_text is included so expected_behavior is grounded in the knowledge base.
+    """
+    # Build RAG-specific sections if knowledge base text is provided
+    rag_section = ""
+    rag_rules = ""
+    if rag_text and rag_text.strip():
+        snippet = rag_text.strip()[:800]
+        rag_section = f"- Knowledge Base (excerpt):\n{snippet}\n"
+        rag_rules = "- The expected_behavior MUST be based on the actual content in the knowledge base above\n- Do NOT hallucinate facts — only reference what is in the knowledge base\n"
+
     prompt = FUNCTIONAL_PROMPT.format(
         application_type=profile.application_type.value,
         domain=profile.domain,
         use_cases=", ".join(profile.use_cases[:4]),
         boundaries=", ".join(profile.boundaries[:3]) or "none specified",
+        rag_section=rag_section,
+        rag_rules=rag_rules,
         persona_name=persona.name,
         background=persona.background[:200] if persona.background else persona.description,
         expertise=persona.expertise.value,
@@ -181,13 +196,16 @@ async def generate_all_functional(
     personas: List[Persona],
     profile: AppProfile,
     llm_client: LLMClient,
+    rag_text: str = "",
 ) -> List[GeneratedPrompt]:
-    """Generate functional prompts for all personas in parallel."""
+    """Generate functional prompts for all personas in parallel.
+    Pass rag_text for RAG mode so expected_behavior is grounded in knowledge base.
+    """
     sem = asyncio.Semaphore(5)
 
     async def _bounded(persona):
         async with sem:
-            return await generate_functional_prompts(persona, profile, llm_client)
+            return await generate_functional_prompts(persona, profile, llm_client, rag_text=rag_text)
 
     batches = await asyncio.gather(*[_bounded(p) for p in personas])
     return [prompt for batch in batches for prompt in batch]

@@ -122,8 +122,9 @@ async def run_pipeline(
         _update(job_store, run_id, 20, "Generating domain-specific test prompts…", "test_gen")
         _log(job_store, run_id, "phase_start", {"phase": "test_gen", "label": "Test Generation"})
 
-        # 2a: Functional prompts
-        func_prompts = await generate_all_functional(personas, profile, llm_client)
+        # 2a: Functional prompts — pass rag_text so expected_behavior is grounded in knowledge base
+        rag_text = config.rag_text if config.is_rag else ""
+        func_prompts = await generate_all_functional(personas, profile, llm_client, rag_text=rag_text)
 
         # 2b: Security prompts (adversarial personas only)
         sec_prompts = await generate_all_security(
@@ -294,7 +295,7 @@ async def run_pipeline(
                 config: RunConfig, llm_client: LLMClient,
             ) -> Tuple[List[MetricResult], List[Conversation], List[Persona]]:
                 new_personas = await build_all_personas(new_slots, profile, llm_client, project_id)
-                new_func = await generate_all_functional(new_personas, profile, llm_client)
+                new_func = await generate_all_functional(new_personas, profile, llm_client, rag_text=rag_text)
                 new_sec  = await generate_all_security(new_personas, profile, llm_client,
                                                        config.selected_attacks, config.attacks_per_category)
                 new_convs = await run_all_conversations(new_personas, new_func + new_sec, config, llm_client, project_id)

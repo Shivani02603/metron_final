@@ -185,17 +185,19 @@ class GeneratedPrompt(BaseModel):
 # ── Stage 3: Conversation ──────────────────────────────────────────────────
 
 class ConversationTurn(BaseModel):
-    turn_number:       int
-    query:             str
-    response:          str
-    latency_ms:        float
-    tokens_input:      Optional[int] = None
-    tokens_output:     Optional[int] = None
-    retrieved_context: Optional[List[str]] = None   # RAG only
-    agent_trace:       Optional[List[Dict[str, Any]]] = None   # multi-agent only
-    persona_state:     ConversationState = ConversationState.SEEKING
-    response_type:     Optional[ResponseType] = None
-    timestamp:         datetime = Field(default_factory=datetime.utcnow)
+    turn_number:        int
+    query:              str
+    response:           str
+    latency_ms:         float
+    expected_behavior:  Optional[str] = None         # ground truth from Stage 2
+    tokens_input:       Optional[int] = None
+    tokens_output:      Optional[int] = None
+    retrieved_context:  Optional[List[str]] = None   # RAG only
+    agent_trace:        Optional[List[Dict[str, Any]]] = None   # multi-agent only
+    persona_state:      ConversationState = ConversationState.SEEKING
+    response_type:      Optional[ResponseType] = None
+    is_error_response:  bool = False                  # True when chatbot returned an HTTP error
+    timestamp:          datetime = Field(default_factory=datetime.utcnow)
 
 class Conversation(BaseModel):
     conversation_id: str = Field(default_factory=lambda: str(uuid.uuid4()))

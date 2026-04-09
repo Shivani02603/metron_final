@@ -27,6 +27,7 @@ interface Scenario {
 interface ToolStatus {
   installed: boolean;
   description: string;
+  used_for?: string;
 }
 
 export default function PreviewPage() {
@@ -152,12 +153,18 @@ export default function PreviewPage() {
   const perfCount = Number(cfg?.performance_requests) || 20;
   const loadCount = Number(cfg?.load_concurrent_users) || 5;
 
-  const tools = [
-    { key: "garak", label: "Garak", icon: "security", description: "Security scanner" },
-    { key: "ragas", label: "RAGAS", icon: "assessment", description: "RAG evaluation" },
-    { key: "deepeval", label: "DeepEval", icon: "grade", description: "LLM evaluation" },
-    { key: "hypothesis", label: "Hypothesis", icon: "science", description: "Edge case testing" },
-  ];
+  // Icon mapping for known tools
+  const TOOL_ICONS: Record<string, string> = {
+    presidio: "policy",
+    detoxify: "block",
+    llm_guard: "shield",
+    deepeval: "grade",
+    ragas: "assessment",
+    rouge_score: "text_compare",
+    bert_score: "psychology",
+    garak: "security",
+    neo4j: "hub",
+  };
 
   return (
     <div className="max-w-4xl mx-auto pb-20 space-y-10 animate-fade-in">
@@ -194,25 +201,36 @@ export default function PreviewPage() {
 
       {/* Tool Status */}
       <div className="card p-6">
-        <h2 className="font-headline text-base font-black tracking-tight text-[var(--color-on-surface)] mb-4">Testing Tools</h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {tools.map((t) => {
-            const status = toolStatus[t.key];
-            const installed = status?.installed ?? false;
+        <h2 className="font-headline text-base font-black tracking-tight text-[var(--color-on-surface)] mb-4">
+          Testing Tools
+          {Object.keys(toolStatus).length > 0 && (
+            <span className="ml-2 text-xs font-normal text-[var(--color-on-surface-variant)] opacity-60">
+              {Object.values(toolStatus).filter((t) => t.installed).length}/{Object.keys(toolStatus).length} installed
+            </span>
+          )}
+        </h2>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          {Object.entries(toolStatus).map(([key, status]) => {
+            const installed = status.installed;
+            const icon = TOOL_ICONS[key] || "build";
+            const label = key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
             return (
-              <div key={t.key} className={`p-4 rounded-xl border ${installed ? "border-[var(--color-secondary)] bg-[rgba(0,110,47,0.04)]" : "border-[var(--color-outline-variant)]"}`}>
+              <div key={key} className={`p-3 rounded-xl border ${installed ? "border-[var(--color-secondary)] bg-[rgba(0,110,47,0.04)]" : "border-[var(--color-outline-variant)]"}`}>
                 <div className="flex items-center gap-2 mb-1">
-                  <span className={`material-symbols-outlined text-base ${installed ? "text-secondary" : "text-[var(--color-on-surface-variant)]"}`}>{t.icon}</span>
-                  <span className="text-sm font-black">{t.label}</span>
+                  <span className={`material-symbols-outlined text-sm ${installed ? "text-secondary" : "text-[var(--color-on-surface-variant)]"}`}>{icon}</span>
+                  <span className="text-xs font-black">{label}</span>
+                  <span className={`ml-auto text-[10px] font-bold ${installed ? "text-secondary" : "text-[var(--color-on-surface-variant)] opacity-60"}`}>
+                    {installed ? "✓" : "⚠"}
+                  </span>
                 </div>
-                <p className="text-xs text-[var(--color-on-surface-variant)] opacity-60">{t.description}</p>
-                <p className={`text-xs font-bold mt-1 ${installed ? "text-secondary" : "text-[var(--color-on-surface-variant)]"}`}>
-                  {installed ? "✓ Installed" : "⚠ Fallback"}
-                </p>
+                <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-60 leading-tight">{status.used_for || status.description}</p>
               </div>
             );
           })}
         </div>
+        {Object.keys(toolStatus).length === 0 && (
+          <p className="text-sm text-[var(--color-on-surface-variant)] opacity-60">Loading tool status…</p>
+        )}
       </div>
 
       {/* Test Count Summary */}
@@ -243,7 +261,7 @@ export default function PreviewPage() {
             <span className="ml-2 text-xs font-normal text-[var(--color-on-surface-variant)] opacity-60">({personas.length})</span>
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {personas.map((p, i) => (
+            {personas.map((p) => (
               <div key={p.id} className="p-4 rounded-xl border border-[var(--color-outline-variant)]">
                 <button
                   onClick={() => togglePersona(p.id)}

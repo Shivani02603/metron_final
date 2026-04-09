@@ -28,21 +28,34 @@ litellm.set_verbose = False
 # ── Rate Limiter ───────────────────────────────────────────────────────────
 
 class RateLimiter:
-    """Token bucket rate limiter with 20% headroom (from existing METRON)."""
+    """Token bucket rate limiter with 20% headroom.
+
+    Each caller reserves a time slot under the lock (fast), then sleeps
+    outside the lock — so multiple callers can sleep concurrently instead
+    of queueing behind each other. This makes asyncio.gather() parallelism
+    actually useful for rate-limited LLM calls.
+    """
 
     def __init__(self, rpm: int = 40):
         self.rpm = rpm
         self.interval = 60.0 / (rpm * 0.8)   # 20% safety headroom
-        self.last_call = 0.0
+        self.next_allowed = 0.0               # next available call slot
         self._lock = asyncio.Lock()
 
     async def wait(self):
         async with self._lock:
             now = time.monotonic()
-            elapsed = now - self.last_call
-            if elapsed < self.interval:
-                await asyncio.sleep(self.interval - elapsed)
-            self.last_call = time.monotonic()
+            if now >= self.next_allowed:
+                # Slot available right now — take it and go
+                self.next_allowed = now + self.interval
+                return
+            # Reserve the next slot; advance the queue pointer
+            my_slot = self.next_allowed
+            self.next_allowed += self.interval
+        # Sleep OUTSIDE the lock — other callers can reserve their slots while we wait
+        sleep_time = my_slot - time.monotonic()
+        if sleep_time > 0:
+            await asyncio.sleep(sleep_time)
 
 
 # ── Unified LLM Client ─────────────────────────────────────────────────────

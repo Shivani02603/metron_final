@@ -112,15 +112,27 @@ async def run_conversation(
         resp: AdapterResponse = await adapter.send(current_message)
         latency_ms = resp.latency_ms
 
-        # Build turn record
+        # Detect error response — includes field-not-found and HTTP errors
+        is_error = (
+            not resp.ok
+            or not resp.text
+            or resp.text.startswith("[Error")
+            or resp.text.startswith("[Field")
+            or resp.text.startswith("[Index")
+            or resp.text.startswith("[Empty")
+        )
+
+        # Build turn record — carry expected_behavior from prompt (turn 1 only; turns 2+ don't have it)
         turn = ConversationTurn(
             turn_number=turn_num,
             query=current_message,
             response=resp.text if resp.ok else f"[Error: {resp.error}]",
             latency_ms=latency_ms,
+            expected_behavior=prompt.expected_behavior if turn_num == 1 else None,
             retrieved_context=resp.retrieved_context,
             agent_trace=resp.agent_trace,
             persona_state=current_state,
+            is_error_response=is_error,
             timestamp=datetime.utcnow(),
         )
         conversation.turns.append(turn)
@@ -129,8 +141,10 @@ async def run_conversation(
         history_lines.append(f"User: {current_message}")
         history_lines.append(f"AI: {turn.response[:300]}")
 
-        # Turn 1 is always "free" — no LLM eval yet, just fire the opening message
-        if turn_num >= MAX_TURNS:
+        # Stop early: last turn reached, or chatbot returned an error/bad field
+        if turn_num >= MAX_TURNS or is_error:
+            if is_error:
+                conversation.goal_achieved = False
             break
 
         # Combined eval+generate for subsequent turns

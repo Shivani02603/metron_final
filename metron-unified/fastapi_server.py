@@ -63,19 +63,100 @@ async def get_providers():
 async def get_tools_status():
     tools = {}
 
-    def _check(pkg: str) -> bool:
+    def _check(pkg: str, attr: str = "") -> bool:
         try:
-            __import__(pkg)
+            mod = __import__(pkg)
+            if attr:
+                return hasattr(mod, attr) or True  # sub-import check
             return True
         except ImportError:
             return False
+        except Exception:
+            return False
 
-    tools["garak"]      = {"installed": _check("garak"),     "description": "LLM vulnerability scanner"}
-    tools["ragas"]      = {"installed": _check("ragas"),      "description": "RAG evaluation metrics"}
-    tools["deepeval"]   = {"installed": _check("deepeval"),   "description": "LLM evaluation framework"}
-    tools["rouge_score"] = {"installed": _check("rouge_score"), "description": "ROUGE text similarity"}
-    tools["bert_score"] = {"installed": _check("bert_score"), "description": "BERTScore semantic similarity"}
-    tools["neo4j"]      = {"installed": _check("neo4j"),      "description": "Persona registry (optional)"}
+    def _check_sub(pkg: str, subpath: str) -> bool:
+        """Check a submodule import like 'deepeval.metrics.GEval'."""
+        try:
+            parts = subpath.split(".")
+            mod = __import__(pkg)
+            for part in parts:
+                mod = getattr(mod, part, None)
+                if mod is None:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    # PII detection
+    presidio_ok = _check("presidio_analyzer")
+    tools["presidio"] = {
+        "installed": presidio_ok,
+        "description": "PII detection (Presidio — replaces LLM PII guessing)",
+        "used_for": "pii_leakage metric in security evaluation",
+    }
+
+    # Toxicity classifier
+    detoxify_ok = _check("detoxify")
+    tools["detoxify"] = {
+        "installed": detoxify_ok,
+        "description": "Toxicity classifier (Detoxify — replaces LLM toxicity scoring)",
+        "used_for": "toxicity metric in security evaluation",
+    }
+
+    # Prompt injection scanner
+    llmguard_ok = _check("llm_guard")
+    tools["llm_guard"] = {
+        "installed": llmguard_ok,
+        "description": "Prompt injection scanner (LLM Guard — replaces LLM injection guessing)",
+        "used_for": "prompt_injection metric in security evaluation",
+    }
+
+    # DeepEval
+    deepeval_ok = _check("deepeval")
+    tools["deepeval"] = {
+        "installed": deepeval_ok,
+        "description": "Structured LLM evaluation (DeepEval — GEval, Hallucination, Bias, Relevancy)",
+        "used_for": "hallucination + answer_relevancy in functional; geval in quality; bias in security",
+    }
+
+    # RAGAS
+    ragas_ok = _check("ragas")
+    tools["ragas"] = {
+        "installed": ragas_ok,
+        "description": "RAG evaluation framework (RAGAS — structural faithfulness, no LLM)",
+        "used_for": "ragas_faithfulness in quality evaluation (RAG mode only)",
+    }
+
+    # ROUGE
+    rouge_ok = _check("rouge_score")
+    tools["rouge_score"] = {
+        "installed": rouge_ok,
+        "description": "ROUGE-L text similarity (no LLM)",
+        "used_for": "rouge_l metric in functional evaluation",
+    }
+
+    # BERTScore
+    bert_ok = _check("bert_score")
+    tools["bert_score"] = {
+        "installed": bert_ok,
+        "description": "BERTScore semantic similarity (no LLM)",
+        "used_for": "bert_score_f1 metric in functional evaluation",
+    }
+
+    # Garak (optional)
+    tools["garak"] = {
+        "installed": _check("garak"),
+        "description": "LLM vulnerability scanner (optional — heavy dependency)",
+        "used_for": "advanced red-teaming (not active in current pipeline)",
+    }
+
+    # Neo4j (optional)
+    tools["neo4j"] = {
+        "installed": _check("neo4j"),
+        "description": "Persona registry (optional — caches personas across runs)",
+        "used_for": "persona caching in stage 1",
+    }
+
     return tools
 
 

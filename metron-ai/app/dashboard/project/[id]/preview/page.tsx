@@ -147,9 +147,14 @@ export default function PreviewPage() {
   const cfg = fullConfig as Record<string, unknown> | null;
 
   // Calculate test counts
-  const funcCount = (personas.length * 2) + (scenarios.length) + 16; // approx
-  const secCount = ((cfg?.selected_attacks as string[] | undefined)?.length ?? 5) * (Number(cfg?.attacks_per_category) || 3);
-  const qualCount = 3 + (cfg?.is_rag ? 1 : 0);
+  const numPersonas = personas.length || Number(cfg?.num_personas) || 3;
+  // functional: 3 prompts per persona × 3 DeepEval metrics + GEval criteria per conversation
+  const funcCount = numPersonas * 3 * 3;
+  // security: attack prompts + golden dataset (20) across all conversations
+  const attacksPerCat = Number(cfg?.attacks_per_category) || 3;
+  const secCount = 5 * attacksPerCat + 20;
+  // quality: GEval criteria per persona conversation (~4 criteria + overall)
+  const qualCount = numPersonas * 3 * (cfg?.is_rag ? 8 : 5);
   const perfCount = Number(cfg?.performance_requests) || 20;
   const loadCount = Number(cfg?.load_concurrent_users) || 5;
 

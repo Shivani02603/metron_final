@@ -11,35 +11,10 @@ const DOMAINS = [
 ];
 
 const APPLICATION_TYPES = [
-  { value: "chatbot",     label: "Chatbot",      icon: "chat",         description: "Generic JSON REST chatbot" },
-  { value: "rag",         label: "RAG Agent",    icon: "library_books", description: "Retrieval-augmented generation" },
-  { value: "multi_agent", label: "Multi-Agent",  icon: "hub",          description: "Multiple specialized agents" },
-  { value: "form",        label: "Form API",     icon: "dynamic_form", description: "Form-encoded (application/x-www-form-urlencoded)" },
+  { value: "chatbot", label: "Chatbot",   icon: "chat",          description: "Generic JSON REST chatbot" },
+  { value: "rag",     label: "RAG Agent", icon: "library_books", description: "Retrieval-augmented generation" },
 ];
 
-const ATTACK_TYPES = [
-  { id: "jailbreak", label: "Jailbreak Attacks", severity: "critical", description: "Role override, roleplay, authority claims" },
-  { id: "prompt_injection", label: "Prompt Injection", severity: "critical", description: "System commands, instruction override" },
-  { id: "pii_extraction", label: "PII Extraction", severity: "high", description: "Extract personal/sensitive data" },
-  { id: "toxicity", label: "Toxicity Probes", severity: "high", description: "Harmful content generation" },
-  { id: "encoding", label: "Encoding Attacks", severity: "medium", description: "Base64, ROT13, Unicode escapes" },
-];
-
-const RAGAS_METRICS = [
-  { id: "faithfulness", label: "Faithfulness" },
-  { id: "answer_relevancy", label: "Answer Relevancy" },
-  { id: "context_precision", label: "Context Precision" },
-  { id: "context_recall", label: "Context Recall" },
-  { id: "answer_correctness", label: "Answer Correctness" },
-];
-
-const DEEPEVAL_METRICS = [
-  { id: "hallucination", label: "Hallucination Detection" },
-  { id: "toxicity", label: "Toxicity Detection" },
-  { id: "bias", label: "Bias Detection" },
-  { id: "coherence", label: "Coherence" },
-  { id: "fluency", label: "Fluency" },
-];
 
 interface Provider {
   description: string;
@@ -101,10 +76,6 @@ export default function ConfigurePage() {
   // Application type
   const [applicationType, setApplicationType] = useState("chatbot");
 
-  // Seed document
-  const [seedDocText, setSeedDocText] = useState("");
-  const [isParsing, setIsParsing] = useState(false);
-  const [parseMsg, setParseMsg] = useState("");
 
   // Persona / scenario generation
   interface Persona { id: string; name: string; description: string; traits: string[]; sample_prompts: string[] }
@@ -164,45 +135,6 @@ export default function ConfigurePage() {
     }
   };
 
-  const handleParseDocument = async () => {
-    if (!seedDocText.trim()) return;
-    setIsParsing(true);
-    setParseMsg("");
-    try {
-      const res = await fetch(`${API}/api/parse-document`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ document_text: seedDocText, llm_provider: llmProvider, llm_api_key: llmApiKey }),
-      });
-      if (!res.ok) throw new Error((await res.json()).detail || "Parse failed");
-      const data = await res.json();
-      if (data.application_type) setApplicationType(data.application_type);
-      if (data.domain) setAgentDomain(data.domain.charAt(0).toUpperCase() + data.domain.slice(1));
-      setParseMsg(`✓ Detected: ${data.application_type} · ${data.domain} · ${data.user_types?.join(", ")}`);
-    } catch (e: unknown) {
-      setParseMsg("Parse failed: " + (e instanceof Error ? e.message : "Unknown error"));
-    } finally {
-      setIsParsing(false);
-    }
-  };
-
-  const toggleAttack = (id: string) => {
-    setSelectedAttacks((prev) =>
-      prev.includes(id) ? prev.filter((a) => a !== id) : [...prev, id]
-    );
-  };
-
-  const toggleRagas = (id: string) => {
-    setRagasMetrics((prev) =>
-      prev.includes(id) ? prev.filter((m) => m !== id) : [...prev, id]
-    );
-  };
-
-  const toggleDeepevalMetric = (id: string) => {
-    setDeepevalMetrics((prev) =>
-      prev.includes(id) ? prev.filter((m) => m !== id) : [...prev, id]
-    );
-  };
 
   const handleGenerate = async () => {
     if (!agentDescription) {
@@ -429,39 +361,6 @@ export default function ConfigurePage() {
           </Field>
         </div>
 
-        {/* Seed Document (optional) */}
-        <div className="border border-dashed border-[var(--color-outline-variant)] rounded-xl p-4 space-y-3">
-          <div className="flex items-center gap-2">
-            <span className="material-symbols-outlined text-[var(--color-on-surface-variant)] text-base">description</span>
-            <p className="text-xs font-bold uppercase tracking-widest text-[var(--color-on-surface-variant)] opacity-70">
-              Seed Document <span className="font-normal normal-case tracking-normal opacity-60">(optional — auto-fills Application Type &amp; Domain)</span>
-            </p>
-          </div>
-          <textarea
-            className="input-field resize-none h-[90px] font-mono text-xs"
-            placeholder="Paste documentation or a description of your AI system… The parser will extract application type, domain, and user types automatically."
-            value={seedDocText}
-            onChange={(e) => setSeedDocText(e.target.value)}
-          />
-          <div className="flex items-center gap-3 flex-wrap">
-            <button
-              onClick={handleParseDocument}
-              disabled={!seedDocText.trim() || isParsing}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl border border-[var(--color-outline)] text-sm font-semibold hover:bg-[var(--color-surface-variant)] transition-colors disabled:opacity-40"
-            >
-              <span className={`material-symbols-outlined text-base ${isParsing ? "animate-spin" : ""}`}>
-                {isParsing ? "progress_activity" : "auto_fix_high"}
-              </span>
-              {isParsing ? "Parsing…" : "Parse & Auto-fill"}
-            </button>
-            {parseMsg && (
-              <p className={`text-xs font-medium ${parseMsg.startsWith("✓") ? "text-secondary" : "text-error"}`}>
-                {parseMsg}
-              </p>
-            )}
-          </div>
-        </div>
-
         {/* Generate Personas button */}
         <div className="pt-2 flex items-center gap-4">
           <button
@@ -637,69 +536,72 @@ export default function ConfigurePage() {
 
       {/* ── Security Tests ─────────────────────────────────── */}
       <Section title="Security Tests" icon="security">
-        <div className="space-y-3 mb-5">
-          {ATTACK_TYPES.map((atk) => (
-            <label key={atk.id} className="flex items-start gap-3 cursor-pointer group">
-              <span
-                onClick={() => toggleAttack(atk.id)}
-                className={`mt-0.5 w-5 h-5 rounded flex items-center justify-center border transition-colors flex-shrink-0 ${
-                  selectedAttacks.includes(atk.id)
-                    ? "bg-primary border-primary"
-                    : "border-[var(--color-outline)] hover:border-primary"
-                }`}
-              >
-                {selectedAttacks.includes(atk.id) && (
-                  <span className="material-symbols-outlined text-white text-xs">check</span>
-                )}
-              </span>
-              <div>
-                <div className="flex items-center gap-2">
-                  <p className="text-sm font-semibold text-[var(--color-on-surface)]">{atk.label}</p>
-                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wide ${
-                    atk.severity === "critical" ? "bg-error/10 text-error" :
-                    atk.severity === "high" ? "bg-tertiary/10 text-tertiary" :
-                    "bg-[var(--color-surface-variant)] text-[var(--color-on-surface-variant)]"
-                  }`}>{atk.severity}</span>
-                </div>
-                <p className="text-xs text-[var(--color-on-surface-variant)] opacity-60">{atk.description}</p>
+        <p className="text-xs text-[var(--color-on-surface-variant)] opacity-70 -mt-2">These evaluations always run on every conversation.</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-5">
+          {[
+            { label: "Prompt Injection",  icon: "code_blocks",  note: "LLM Guard" },
+            { label: "PII Leakage",       icon: "policy",       note: "Presidio" },
+            { label: "Toxicity (Output)", icon: "block",        note: "Detoxify" },
+            { label: "Bias & Fairness",   icon: "balance",      note: "DeepEval" },
+            { label: "Toxic Request",     icon: "dangerous",    note: "Golden dataset + Detoxify" },
+            { label: "Attack Resistance", icon: "shield",       note: "LLM Judge" },
+          ].map((t) => (
+            <div key={t.label} className="flex items-center gap-3 p-3 rounded-xl bg-[var(--color-surface-container-low)] border border-[var(--color-outline-variant)]">
+              <span className="material-symbols-outlined text-base text-secondary">{t.icon}</span>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-[var(--color-on-surface)]">{t.label}</p>
+                <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-60">{t.note}</p>
               </div>
-            </label>
+              <span className="material-symbols-outlined text-sm text-secondary ml-auto">check_circle</span>
+            </div>
           ))}
         </div>
-        <SliderField label="Attacks per Category" min={1} max={10} value={attacksPerCategory} onChange={setAttacksPerCategory} />
+        <SliderField label="Attack Prompts per Category" min={1} max={10} value={attacksPerCategory} onChange={setAttacksPerCategory} />
       </Section>
 
       {/* ── Quality Metrics ────────────────────────────────── */}
       <Section title="Quality Metrics" icon="grade">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div>
-            <p className="text-xs font-bold uppercase tracking-widest text-[var(--color-on-surface-variant)] opacity-60 mb-3">RAGAS Metrics</p>
-            <div className="space-y-2">
-              {RAGAS_METRICS.map((m) => (
-                <CheckboxRow
-                  key={m.id}
-                  label={m.label}
-                  checked={ragasMetrics.includes(m.id)}
-                  onChange={() => toggleRagas(m.id)}
-                />
-              ))}
+        <p className="text-xs text-[var(--color-on-surface-variant)] opacity-70 -mt-2">These metrics always run on every conversation.</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-4">
+          {[
+            { label: "Hallucination",    note: "DeepEval" },
+            { label: "Answer Relevancy", note: "DeepEval" },
+            { label: "Usefulness",       note: "DeepEval" },
+          ].map((m) => (
+            <div key={m.label} className="flex items-center gap-3 p-3 rounded-xl bg-[var(--color-surface-container-low)] border border-[var(--color-outline-variant)]">
+              <span className="material-symbols-outlined text-base text-secondary">check_circle</span>
+              <div>
+                <p className="text-sm font-semibold text-[var(--color-on-surface)]">{m.label}</p>
+                <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-60">{m.note}</p>
+              </div>
             </div>
-          </div>
-          <div>
-            <p className="text-xs font-bold uppercase tracking-widest text-[var(--color-on-surface-variant)] opacity-60 mb-3">DeepEval Metrics</p>
-            <div className="space-y-2">
-              {DEEPEVAL_METRICS.map((m) => (
-                <CheckboxRow
-                  key={m.id}
-                  label={m.label}
-                  checked={deepevalMetrics.includes(m.id)}
-                  onChange={() => toggleDeepevalMetric(m.id)}
-                />
-              ))}
-              <CheckboxRow label="G-Eval (Custom Criteria)" checked={useGeval} onChange={() => setUseGeval(!useGeval)} />
+          ))}
+          <div className="flex items-center gap-3 p-3 rounded-xl bg-[var(--color-surface-container-low)] border border-[var(--color-outline-variant)]">
+            <span className="material-symbols-outlined text-base text-secondary">check_circle</span>
+            <div>
+              <p className="text-sm font-semibold text-[var(--color-on-surface)]">GEval (Domain Criteria)</p>
+              <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-60">DeepEval — auto-generated for your domain</p>
             </div>
           </div>
         </div>
+        {isRag && (
+          <div className="space-y-2">
+            <p className="text-xs font-bold uppercase tracking-widest text-[var(--color-on-surface-variant)] opacity-60">RAG Mode — also runs</p>
+            {[
+              { label: "Faithfulness",      note: "RAGAS" },
+              { label: "Context Recall",    note: "RAGAS" },
+              { label: "Context Precision", note: "RAGAS" },
+            ].map((m) => (
+              <div key={m.label} className="flex items-center gap-3 p-3 rounded-xl bg-[var(--color-surface-container-low)] border border-[var(--color-outline-variant)]">
+                <span className="material-symbols-outlined text-base text-secondary">check_circle</span>
+                <div>
+                  <p className="text-sm font-semibold text-[var(--color-on-surface)]">{m.label}</p>
+                  <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-60">{m.note}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </Section>
 
       {/* ── Actions ────────────────────────────────────────── */}

@@ -5,6 +5,40 @@ import { useParams, useRouter } from "next/navigation";
 
 const API = "http://localhost:8000";
 
+// ── Metric display name mapping ───────────────────────────────────────────────
+const METRIC_LABELS: Record<string, string> = {
+  // Functional
+  hallucination:          "Hallucination",
+  answer_relevancy:       "Answer Relevancy",
+  usefulness:             "Usefulness",
+  llm_judge:              "LLM Judge",
+  // Security
+  pii_leakage:            "PII Leakage",
+  toxicity:               "Toxicity (Output)",
+  prompt_injection:       "Prompt Injection",
+  bias_fairness:          "Bias & Fairness",
+  toxic_request:          "Toxic Request",
+  attack_resistance:      "Attack Resistance",
+  // Quality / RAG
+  geval_overall:          "GEval Overall",
+  ragas_faithfulness:     "Faithfulness (RAGAS)",
+  ragas_answer_relevancy: "Answer Relevancy (RAGAS)",
+  ragas_context_recall:   "Context Recall (RAGAS)",
+  ragas_context_precision:"Context Precision (RAGAS)",
+};
+
+function metricLabel(name: string): string {
+  if (METRIC_LABELS[name]) return METRIC_LABELS[name];
+  if (name.startsWith("geval_")) {
+    return "GEval " + name.slice(6).replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  }
+  return name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// Security metrics: detection = pass means no issue found; resistance = pass means attack was blocked
+function isDetectionMetric(name: string) { return ["pii_leakage", "toxicity", "bias_fairness"].includes(name); }
+function isResistanceMetric(name: string) { return ["prompt_injection", "attack_resistance", "toxic_request"].includes(name); }
+
 // ─────────────────────────────────── Types ────────────────────────────────────
 interface TestResult {
   test_id: string;
@@ -382,7 +416,7 @@ function FunctionalTab({
             >
               <div className="flex items-center gap-3">
                 <span className="material-symbols-outlined text-base text-primary">category</span>
-                <p className="text-sm font-black capitalize">{cat.replace(/_/g, " ")}</p>
+                <p className="text-sm font-black">{metricLabel(cat)}</p>
               </div>
               <div className="flex items-center gap-3">
                 <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${catRate >= 70 ? "badge-pass" : "badge-fail"}`}>
@@ -457,13 +491,20 @@ function SecurityTab({ data }: { data: PhaseSummary }) {
   const scoreColor = secScore >= 90 ? "text-secondary" : secScore >= 70 ? "text-[#855300]" : "text-error";
   const toggle = (id: string) => setExpanded((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
-  // Group by category (security_xxx)
+  // Group by full metric name (category field now holds the full metric_name)
   const byCategory: Record<string, TestResult[]> = {};
   for (const r of data.results) {
-    const cat = r.category.replace("security_", "") || "general";
+    const cat = r.category || "general";
     if (!byCategory[cat]) byCategory[cat] = [];
     byCategory[cat].push(r);
   }
+
+  // Ordered display: detection metrics first, then resistance metrics
+  const ORDER = ["pii_leakage", "toxicity", "prompt_injection", "bias_fairness", "toxic_request", "attack_resistance"];
+  const sortedEntries = Object.entries(byCategory).sort(([a], [b]) => {
+    const ai = ORDER.indexOf(a); const bi = ORDER.indexOf(b);
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+  });
 
   return (
     <div className="space-y-6">
@@ -472,14 +513,20 @@ function SecurityTab({ data }: { data: PhaseSummary }) {
         <div>
           <p className="font-semibold">Security Score</p>
           <p className="text-xs text-[var(--color-on-surface-variant)] opacity-60">
-            {data.passed}/{data.total} attacks blocked
+            {data.passed}/{data.total} checks passed
             {secScore >= 90 ? " — Excellent" : secScore >= 70 ? " — Acceptable" : " — Needs Improvement"}
           </p>
         </div>
       </div>
 
-      {Object.entries(byCategory).map(([cat, results]) => {
-        const blocked = results.filter((r) => r.passed).length;
+      {sortedEntries.map(([cat, results]) => {
+        const passed = results.filter((r) => r.passed).length;
+        const passLabel = isDetectionMetric(cat)
+          ? `${passed}/${results.length} clean`
+          : `${passed}/${results.length} blocked`;
+        const inputLabel = isResistanceMetric(cat) ? "Attack Prompt" : "Input";
+        const outputLabel = "AI Response";
+
         return (
           <div key={cat} className="border border-[var(--color-outline-variant)] rounded-xl overflow-hidden">
             <button
@@ -487,14 +534,14 @@ function SecurityTab({ data }: { data: PhaseSummary }) {
               className="w-full flex items-center justify-between p-4 hover:bg-[var(--color-surface-container-low)] transition-colors"
             >
               <div className="flex items-center gap-3">
-                <span className={`material-symbols-outlined text-base ${blocked === results.length ? "text-secondary" : "text-error"}`}>
-                  {blocked === results.length ? "shield" : "shield_with_warning"}
+                <span className={`material-symbols-outlined text-base ${passed === results.length ? "text-secondary" : "text-error"}`}>
+                  {passed === results.length ? "shield" : "shield_with_warning"}
                 </span>
-                <p className="text-sm font-black capitalize">{cat.replace(/_/g, " ")}</p>
+                <p className="text-sm font-black">{metricLabel(cat)}</p>
               </div>
               <div className="flex items-center gap-3">
-                <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${blocked === results.length ? "badge-pass" : "badge-fail"}`}>
-                  {blocked}/{results.length} blocked
+                <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${passed === results.length ? "badge-pass" : "badge-fail"}`}>
+                  {passLabel}
                 </span>
                 <span className="material-symbols-outlined text-base text-[var(--color-on-surface-variant)]">
                   {expanded.has(cat) ? "expand_less" : "expand_more"}
@@ -505,22 +552,24 @@ function SecurityTab({ data }: { data: PhaseSummary }) {
               <div className="divide-y divide-[var(--color-outline-variant)]">
                 {results.map((r) => (
                   <div key={r.test_id} className="p-4 space-y-2">
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className={`material-symbols-outlined text-base ${r.passed ? "text-secondary" : "text-error"}`}>
                         {r.passed ? "check_circle" : "cancel"}
                       </span>
                       <p className="text-sm font-semibold">{r.test_name}</p>
-                      {r.details?.severity && (
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${
-                          r.details.severity === "critical" ? "bg-error/10 text-error" :
-                          r.details.severity === "high" ? "bg-tertiary/10 text-[#855300]" : "bg-[var(--color-surface-variant)] text-[var(--color-on-surface-variant)]"
-                        }`}>{r.details.severity as string}</span>
-                      )}
+                      <span className={`text-[10px] font-black ml-auto ${r.passed ? "text-secondary" : "text-error"}`}>
+                        {(r.score * 100).toFixed(0)}%
+                      </span>
                     </div>
                     {r.reasoning && (
-                      <p className="text-xs text-[var(--color-on-surface-variant)] pl-8">{r.reasoning}</p>
+                      <p className="text-xs text-[var(--color-on-surface-variant)] pl-8 leading-relaxed">{r.reasoning}</p>
                     )}
-                    <ConversationBlock input={r.input_text} output={r.output_text} inputLabel="Attack" outputLabel="Response" />
+                    <ConversationBlock
+                      input={r.input_text}
+                      output={r.output_text}
+                      inputLabel={inputLabel}
+                      outputLabel={outputLabel}
+                    />
                   </div>
                 ))}
               </div>
@@ -581,19 +630,24 @@ function QualityTab({ data }: { data: PhaseSummary }) {
                 </div>
               )}
               {/* Metric breakdown from details */}
-              {Array.isArray((r.details as { metrics?: unknown[] })?.metrics) && (
-                <div className="space-y-2">
-                  {((r.details as { metrics?: Array<{ metric_name: string; score: number; passed: boolean }> })?.metrics ?? []).map((m, i) => (
-                    <div key={i} className="flex items-center gap-3 text-xs">
-                      <span className={`material-symbols-outlined text-sm ${m.passed ? "text-secondary" : "text-error"}`}>
-                        {m.passed ? "check" : "close"}
-                      </span>
-                      <span className="font-semibold capitalize">{m.metric_name.replace(/_/g, " ")}</span>
-                      <span className="ml-auto font-black">{(m.score * 100).toFixed(0)}%</span>
-                    </div>
-                  ))}
-                </div>
-              )}
+              {(() => {
+                type MetricEntry = { metric_name: string; score: number; passed: boolean };
+                const metrics = (r.details as { metrics?: MetricEntry[] })?.metrics;
+                if (!Array.isArray(metrics) || metrics.length === 0) return null;
+                return (
+                  <div className="space-y-2">
+                    {metrics.map((m, i) => (
+                      <div key={i} className="flex items-center gap-3 text-xs">
+                        <span className={`material-symbols-outlined text-sm ${m.passed ? "text-secondary" : "text-error"}`}>
+                          {m.passed ? "check" : "close"}
+                        </span>
+                        <span className="font-semibold capitalize">{m.metric_name.replace(/_/g, " ")}</span>
+                        <span className="ml-auto font-black">{(m.score * 100).toFixed(0)}%</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>

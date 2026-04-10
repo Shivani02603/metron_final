@@ -100,6 +100,7 @@ async def run_conversation(
         persona_id=persona.persona_id,
         persona_name=persona.name,
         test_class=prompt.test_class,
+        attack_category=prompt.attack_category,
         started_at=datetime.utcnow(),
     )
 

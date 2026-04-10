@@ -205,6 +205,7 @@ class Conversation(BaseModel):
     persona_id:      str
     persona_name:    str = ""
     test_class:      TestClass
+    attack_category: Optional[str] = None   # set from GeneratedPrompt (e.g. "toxic_request", "prompt_injection")
     turns:           List[ConversationTurn] = []
     final_state:     Optional[ConversationState] = None
     goal_achieved:   Optional[bool] = None

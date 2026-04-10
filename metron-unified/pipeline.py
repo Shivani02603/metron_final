@@ -258,7 +258,17 @@ async def run_pipeline(
         # Stage 4: Load evaluation
         _update(job_store, run_id, 84, f"Running load test ({config.load_concurrent_users} concurrent users)…", "load")
         _log(job_store, run_id, "phase_start", {"phase": "load", "label": f"Load Test — {config.load_concurrent_users} concurrent users"})
-        load_metrics = await evaluate_load(config)
+        try:
+            load_metrics = await evaluate_load(config)
+        except Exception as load_err:
+            print(f"[Pipeline] Load test failed: {load_err}")
+            load_metrics = {
+                "tool_used": "locust", "concurrent_users": config.load_concurrent_users,
+                "total_requests": 0, "successful": 0, "errors": 0,
+                "error_rate": 0.0, "avg_latency_ms": 0.0, "p95_latency_ms": 0.0,
+                "p99_latency_ms": 0.0, "requests_per_second": 0.0,
+                "passed": False, "assessment": f"load test error: {str(load_err)[:100]}",
+            }
         _log(job_store, run_id, "load_complete", {
             "concurrent_users": load_metrics.get("concurrent_users", 0),
             "total_requests": load_metrics.get("total_requests", 0),
@@ -347,11 +357,10 @@ async def run_pipeline(
         tc = final_json.get("test_classes", {})
 
         def _to_test_result(r: MetricResult) -> dict:
-            cat = r.metric_name.split("_")[0] if "_" in r.metric_name else r.metric_name
             return {
                 "test_id":    f"{r.metric_name}_{r.persona_id[:8]}_{r.conversation_id[:6]}",
-                "test_name":  f"{r.metric_name.replace('_', ' ').title()} — {r.persona_name}",
-                "category":   cat,
+                "test_name":  r.persona_name,
+                "category":   r.metric_name,   # full name — frontend maps to pretty label
                 "input_text": r.prompt,
                 "output_text": r.response,
                 "score":      r.score,
@@ -365,6 +374,8 @@ async def run_pipeline(
                     "pii_detected":        r.pii_detected,
                 },
             }
+
+
 
         def _flat_phase(cls_key: str, results: list) -> dict:
             summary = tc.get(cls_key, {})
@@ -402,7 +413,7 @@ async def run_pipeline(
             "avg_latency":         load_metrics.get("avg_latency_ms", 0),
             "p95_latency":         load_metrics.get("p95_latency_ms", 0),
             "requests_per_second": load_metrics.get("requests_per_second", 0),
-            "tool_used":           "built-in async",
+            "tool_used":           load_metrics.get("tool_used", "locust"),
         }
 
         # Fix persona_breakdown pass_rate from 0-1 to 0-100

@@ -6,6 +6,23 @@ import { useParams, useRouter } from "next/navigation";
 const API = "http://localhost:8000";
 const POLL_INTERVAL = 2500;
 
+const METRIC_LABELS: Record<string, string> = {
+  hallucination: "Hallucination", answer_relevancy: "Answer Relevancy",
+  usefulness: "Usefulness", llm_judge: "LLM Judge",
+  pii_leakage: "PII Leakage", toxicity: "Toxicity (Output)",
+  prompt_injection: "Prompt Injection", bias_fairness: "Bias & Fairness",
+  toxic_request: "Toxic Request", attack_resistance: "Attack Resistance",
+  geval_overall: "GEval Overall", ragas_faithfulness: "Faithfulness (RAGAS)",
+  ragas_answer_relevancy: "Answer Relevancy (RAGAS)",
+  ragas_context_recall: "Context Recall (RAGAS)",
+  ragas_context_precision: "Context Precision (RAGAS)",
+};
+function metricLabel(name: string): string {
+  if (METRIC_LABELS[name]) return METRIC_LABELS[name];
+  if (name.startsWith("geval_")) return "GEval " + name.slice(6).replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  return name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
 // ─────────────────────────────────── Types ────────────────────────────────────
 
 interface LogEvent {
@@ -70,7 +87,7 @@ function PersonaCard({ content }: { content: Record<string, unknown> }) {
           <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--color-surface-variant)] font-semibold">{content.expertise as string}</span>
           <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--color-surface-variant)] font-semibold">{content.emotional_state as string}</span>
         </div>
-        {content.goal && (
+        {!!content.goal && (
           <p className="text-xs text-[var(--color-on-surface-variant)] opacity-80 leading-relaxed">
             Goal: {content.goal as string}
           </p>
@@ -96,12 +113,12 @@ function TestPromptCard({ content }: { content: Record<string, unknown> }) {
             {content.test_class as string}
           </span>
           <span className="text-[10px] text-[var(--color-on-surface-variant)] opacity-60">for {content.persona_name as string}</span>
-          {isSecure && content.attack_category && (
+          {isSecure && !!content.attack_category && (
             <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#855300]/10 text-[#855300] font-semibold">{content.attack_category as string}</span>
           )}
         </div>
         <p className="text-xs font-medium text-[var(--color-on-surface)] leading-relaxed">"{content.text as string}"</p>
-        {!isSecure && content.expected_behavior && (
+        {!isSecure && !!content.expected_behavior && (
           <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-60 mt-1.5">
             Expected: {content.expected_behavior as string}
           </p>
@@ -204,7 +221,7 @@ function EvalBatchCard({ content }: { content: Record<string, unknown> }) {
               </span>
               <div className="min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-[11px] font-semibold text-[var(--color-on-surface)]">{s.metric_name}</span>
+                  <span className="text-[11px] font-semibold text-[var(--color-on-surface)]">{metricLabel(s.metric_name)}</span>
                   <span className="text-[10px] text-[var(--color-on-surface-variant)] opacity-60">— {s.persona_name}</span>
                   <span className={`text-[11px] font-black ml-auto ${s.passed ? "text-secondary" : "text-error"}`}>{s.score}%</span>
                 </div>

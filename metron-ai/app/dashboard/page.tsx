@@ -25,10 +25,7 @@ export default function ProjectHub() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
 
-  const [projects, setProjects] = useState<Project[]>([
-    { id: "mock-1", name: "Customer Service Agent V2", endpoint: "https://api.v2.supportAI.net", status: "Healthy", runs: 124, lastScore: 94, type: "Chatbot" },
-    { id: "mock-2", name: "Finance RAG Engine", endpoint: "https://finance-rag.metron.ai", status: "Healthy", runs: 45, lastScore: 88, type: "RAG System" },
-  ]);
+  const [projects, setProjects] = useState<Project[]>([]);
 
   const handleProjectClick = (projectId: string) => {
     router.push(`/dashboard/project/${projectId}`);
@@ -119,23 +116,18 @@ export default function ProjectHub() {
         </button>
       </div>
 
-      {/* ─── Stats ───────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="p-6 rounded-3xl bg-[var(--color-surface-container-low)]/50 border border-[var(--color-outline-variant)] border-opacity-10 space-y-1">
-          <p className="text-[9px] font-black uppercase tracking-widest text-[var(--color-outline)] opacity-70">Total Agents</p>
-          <p className="text-3xl font-black font-headline text-[var(--color-on-surface)]">{projects.length}</p>
-        </div>
-        <div className="p-6 rounded-3xl bg-[var(--color-surface-container-low)]/50 border border-[var(--color-outline-variant)] border-opacity-10 space-y-1">
-          <p className="text-[9px] font-black uppercase tracking-widest text-[var(--color-outline)] opacity-70">Avg Compliance</p>
-          <p className="text-3xl font-black font-headline text-[#006e2f]">91.2%</p>
-        </div>
-        <div className="p-6 rounded-3xl bg-[var(--color-surface-container-low)]/50 border border-[var(--color-outline-variant)] border-opacity-10 space-y-1">
-          <p className="text-[9px] font-black uppercase tracking-widest text-[var(--color-outline)] opacity-70">System Health</p>
-          <p className="text-3xl font-black font-headline text-[var(--color-primary-container)] uppercase tracking-tighter">Active</p>
-        </div>
-      </div>
-
       {/* ─── Projects Grid ───────────────────────────────────── */}
+      {projects.length === 0 && (
+        <div className="flex flex-col items-center justify-center py-24 gap-4 text-center">
+          <div className="w-16 h-16 rounded-2xl bg-[var(--color-surface-container-low)] border border-[var(--color-outline-variant)] flex items-center justify-center">
+            <span className="material-symbols-outlined text-3xl text-[var(--color-outline)]">hub</span>
+          </div>
+          <div className="space-y-1">
+            <p className="font-headline text-lg font-black text-[var(--color-on-surface)]">No projects yet</p>
+            <p className="text-sm text-[var(--color-on-surface-variant)] opacity-60">Click &ldquo;Connect New Project&rdquo; to add your first AI system.</p>
+          </div>
+        </div>
+      )}
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
         {projects.map((proj) => (
           <div

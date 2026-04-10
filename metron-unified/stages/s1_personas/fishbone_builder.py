@@ -115,12 +115,15 @@ def build_slots(profile: AppProfile, num_personas: int = 6) -> List[Dict[str, st
 
     # Trim or pad to num_personas
     if len(slots) > num_personas:
-        # Keep balance: prioritise group A (genuine), then adversarial, then others
-        genuine    = [s for s in slots if s["intent"] == "genuine"]
+        genuine     = [s for s in slots if s["intent"] == "genuine"]
         adversarial = [s for s in slots if s["intent"] == "adversarial"]
-        edge       = [s for s in slots if s["intent"] == "edge_case"]
-        combined   = genuine + adversarial + edge
-        slots      = combined[:num_personas]
+        edge        = [s for s in slots if s["intent"] == "edge_case"]
+        # Always keep at least 2 adversarial slots so attack_resistance + toxic_request run.
+        # Previous logic put genuine first → adversarial got trimmed away at num_personas=6.
+        adv_keep  = adversarial[:max(2, num_personas // 3)]
+        remaining = num_personas - len(adv_keep)
+        others    = (genuine + edge)[:remaining]
+        slots     = others + adv_keep
 
     return slots
 

@@ -16,10 +16,6 @@ groq>=0.4.0
 google-generativeai>=0.4.0
 openai>=1.12.0          # Azure OpenAI
 
-# ── Evaluation: text similarity ───────────────────────────────────────────────
-rouge-score>=0.1.2
-bert-score>=0.3.13
-
 # ── Evaluation: LLM quality frameworks ───────────────────────────────────────
 deepeval>=0.21.0
 ragas>=0.1.0
@@ -36,13 +32,16 @@ detoxify>=0.5.0
 # ── Security: prompt injection detection ─────────────────────────────────────
 llm-guard>=0.3.0
 
+# ── Load testing ─────────────────────────────────────────────────────────────
+locust>=2.20.0
+
+# ── Golden datasets (AdvBench, HarmBench from HuggingFace) ───────────────────
+datasets>=2.14.0
+
 # ── NLP support ───────────────────────────────────────────────────────────────
 # spacy version managed by presidio-analyzer (requires spacy~=3.4 or 3.5, not 3.7)
 # Do NOT pin spacy here — let presidio pull its compatible version automatically
-torch>=2.0.0            # required by detoxify + bert-score
-
-# ── Optional: Neo4j persona registry ────────────────────────────────────────
-# neo4j>=5.0.0
+torch>=2.0.0            # required by detoxify
 
 # ── Optional: document parsing ───────────────────────────────────────────────
 # PyPDF2>=3.0.0

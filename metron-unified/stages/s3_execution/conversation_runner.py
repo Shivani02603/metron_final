@@ -109,8 +109,11 @@ async def run_conversation(
     history_lines: List[str] = []
 
     for turn_num in range(1, MAX_TURNS + 1):
-        # Send to adapter
+        # Send to adapter — retry once on 429 (target endpoint rate limit)
         resp: AdapterResponse = await adapter.send(current_message)
+        if resp.error and "429" in str(resp.error):
+            await asyncio.sleep(2)
+            resp = await adapter.send(current_message)
         latency_ms = resp.latency_ms
 
         # Detect error response — includes field-not-found and HTTP errors
@@ -263,7 +266,7 @@ async def run_all_conversations(
 
     total = len(ordered)
     completed = 0
-    sem = asyncio.Semaphore(5)  # max 3 concurrent conversations
+    sem = asyncio.Semaphore(3)  # max 3 concurrent conversations — avoids overwhelming target endpoint
 
     async def _run_one(prompt):
         nonlocal completed

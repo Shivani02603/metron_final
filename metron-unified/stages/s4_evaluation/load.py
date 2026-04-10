@@ -266,9 +266,20 @@ async def evaluate_load(config: RunConfig) -> Dict[str, Any]:
         try:
             proc_result = await loop.run_in_executor(None, _run_locust)
         except subprocess.TimeoutExpired:
-            raise RuntimeError(
-                f"Locust timed out after {timeout}s (duration={duration_s}s, users={num_users})"
-            )
+            # Try to parse whatever CSV Locust wrote before the timeout fired.
+            # Locust flushes CSV incrementally so partial results are often available.
+            print(f"[Load] Locust timed out after {timeout}s — attempting partial CSV parse...")
+            try:
+                metrics = _parse_locust_csv(csv_prefix)
+                metrics["warning"] = f"Partial results: Locust timed out after {timeout}s"
+                print(f"[Load] Partial results recovered from CSV.")
+                return metrics
+            except (FileNotFoundError, ValueError):
+                raise RuntimeError(
+                    f"Locust timed out after {timeout}s with no results written. "
+                    f"Try reducing user count or duration. "
+                    f"(duration={duration_s}s, users={num_users})"
+                )
 
         # Always print stderr so server logs show what Locust did
         stderr_text = proc_result.stderr.decode(errors="replace")

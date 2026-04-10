@@ -50,7 +50,7 @@ _LOCUST_FILE_TEMPLATE = textwrap.dedent("""\
 
 
     class AIEndpointUser(HttpUser):
-        wait_time = between(0.5, 2.0)
+        wait_time = between(1.0, 3.0)
 
         def on_start(self):
             if _AUTH_TYPE == "bearer" and _AUTH_TOKEN:
@@ -230,21 +230,25 @@ async def evaluate_load(config: RunConfig) -> Dict[str, Any]:
 
         host = _build_locust_file(config, locust_file)
 
+        # Gradual spawn: ramp up 1/5th of users per second (spreads load, avoids thundering herd)
+        spawn_rate = max(1, num_users // 5)
+
         cmd = [
             sys.executable, "-m", "locust",
             "--headless",
             "--host",        host,
             "--users",       str(num_users),
-            "--spawn-rate",  str(num_users),   # spawn all at once
+            "--spawn-rate",  str(spawn_rate),
             "--run-time",    f"{duration_s}s",
             "--csv",         csv_prefix,
             "--exit-code-on-error", "0",       # don't fail subprocess on HTTP errors
             "-f",            locust_file,
         ]
 
-        print(f"[Load] Starting Locust: {num_users} users, {duration_s}s → {config.endpoint_url}")
+        print(f"[Load] Starting Locust: {num_users} users at spawn_rate={spawn_rate}/s, {duration_s}s → {config.endpoint_url}")
 
-        timeout = duration_s + 60   # generous buffer for spawn + cleanup
+        # Scale timeout with user count: base 60s + buffer for startup + teardown with high concurrency
+        timeout = duration_s + max(60, num_users * 3)
 
         # Use subprocess.run in a thread executor instead of asyncio.create_subprocess_exec.
         # asyncio.create_subprocess_exec requires ProactorEventLoop on Windows but uvicorn

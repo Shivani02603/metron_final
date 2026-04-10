@@ -162,6 +162,44 @@ export default function ResultsPage() {
     a.click();
   };
 
+  const downloadAllPromptsCSV = () => {
+    if (!results) return;
+
+    const escape = (s: string) => `"${String(s ?? "").replace(/"/g, '""')}"`;
+
+    const headers = [
+      "Suite", "Metric / Test", "Category",
+      "Prompt (Input)", "AI Response (Output)",
+      "Score", "Passed", "Reasoning", "Latency (ms)",
+    ];
+
+    const toRows = (suite: string, items: TestResult[] = []) =>
+      items.map((r) => [
+        escape(suite),
+        escape(r.test_name || ""),
+        escape(r.category || ""),
+        escape((r.input_text || "").slice(0, 300)),
+        escape((r.output_text || "").slice(0, 300)),
+        r.score?.toFixed(4) ?? "",
+        r.passed ? "PASS" : "FAIL",
+        escape(r.reasoning || ""),
+        r.latency_ms?.toFixed(0) ?? "",
+      ]);
+
+    const rows = [
+      ...toRows("Functional", results.functional?.results),
+      ...toRows("Security",   results.security?.results),
+      ...toRows("Quality",    results.quality?.results),
+    ];
+
+    const csv = [headers, ...rows.map((r) => r.join(","))].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `metron_all_prompts_${Date.now()}.csv`;
+    a.click();
+  };
+
   const downloadCSV = () => {
     if (!results?.functional?.results) return;
     const headers = ["Test ID", "Name", "Category", "Score", "Passed", "Latency(ms)", "Input", "Output"];
@@ -334,9 +372,15 @@ Health Score: ${(r.health_score * 100).toFixed(1)}% | ${r.passed ? "PASSED" : "F
                   onClick={downloadJSON}
                 />
                 <ExportCard
+                  icon="checklist"
+                  title="All Prompts CSV"
+                  description="Every prompt across functional, security, and quality — with pass/fail, score, AI response, and reasoning."
+                  onClick={downloadAllPromptsCSV}
+                />
+                <ExportCard
                   icon="table_chart"
                   title="Functional CSV"
-                  description="Functional test results as a spreadsheet-compatible CSV file."
+                  description="Functional test results only as a spreadsheet-compatible CSV file."
                   onClick={downloadCSV}
                 />
                 {results.report_html && (

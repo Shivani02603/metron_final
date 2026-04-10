@@ -96,7 +96,8 @@ export default function ProjectHub() {
   };
 
   return (
-    <div className="space-y-10 animate-fade-in relative max-w-7xl mx-auto pb-20">
+    <>
+    <div className="space-y-10 animate-fade-in max-w-7xl mx-auto pb-20">
       {/* ─── Page Header ─────────────────────────────────────── */}
       <div className="flex flex-col md:flex-row md:items-end justify-between items-start gap-4">
         <div className="space-y-1.5">
@@ -173,15 +174,20 @@ export default function ProjectHub() {
         ))}
       </div>
 
+    </div>
+
       {/* ─── CONNECT PROJECT MODAL ────────────────────────────── */}
+      {/* Rendered outside the animated wrapper so fixed positioning covers the full viewport */}
       {showModal && (
-        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4 overflow-hidden">
-          <div className="absolute inset-0 bg-[#001e2c]/60 backdrop-blur-md animate-fade-in" onClick={closeModal} />
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4">
+          {/* Full-screen backdrop */}
+          <div className="fixed inset-0 bg-[#001e2c]/60 backdrop-blur-md" onClick={closeModal} />
 
-          <div className="relative w-full max-w-lg bg-[var(--color-surface-container-lowest)] rounded-[2.5rem] shadow-[0px_64px_128px_-12px_rgba(0,30,44,0.4)] flex flex-col animate-fade-in border border-white/5 overflow-hidden">
+          {/* Modal card — max-h so button is always visible; form area scrolls */}
+          <div className="relative w-full max-w-lg bg-[var(--color-surface-container-lowest)] rounded-[2.5rem] shadow-[0px_64px_128px_-12px_rgba(0,30,44,0.4)] flex flex-col animate-fade-in border border-white/5 max-h-[90vh]">
 
-            {/* Header */}
-            <div className="p-8 pb-4 flex justify-between items-start border-b border-[var(--color-outline-variant)] border-opacity-10">
+            {/* Header — fixed at top */}
+            <div className="p-8 pb-4 flex justify-between items-start border-b border-[var(--color-outline-variant)] border-opacity-10 flex-shrink-0">
               <div className="space-y-1">
                 <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-primary/10 border border-primary/20">
                   <span className="material-symbols-outlined text-primary text-sm leading-none">smart_toy</span>
@@ -190,13 +196,13 @@ export default function ProjectHub() {
                 <h2 className="font-headline text-3xl font-black text-[var(--color-on-surface)] tracking-tighter">Connect Project</h2>
                 <p className="text-[10px] text-outline opacity-50">You'll choose test configuration on the next screen.</p>
               </div>
-              <button onClick={closeModal} className="w-10 h-10 rounded-xl bg-surface-container-low hover:bg-error/10 hover:text-error transition-all flex items-center justify-center text-outline">
+              <button onClick={closeModal} className="w-10 h-10 rounded-xl bg-surface-container-low hover:bg-error/10 hover:text-error transition-all flex items-center justify-center text-outline flex-shrink-0">
                 <span className="material-symbols-outlined text-xl">close</span>
               </button>
             </div>
 
-            {/* Form */}
-            <div className="p-8 space-y-6">
+            {/* Form — scrollable */}
+            <div className="p-8 space-y-6 overflow-y-auto flex-1">
 
               {/* Project Name */}
               <div className="space-y-2">
@@ -273,8 +279,8 @@ export default function ProjectHub() {
               )}
             </div>
 
-            {/* Footer */}
-            <div className="px-8 pb-8">
+            {/* Footer — fixed at bottom, always visible */}
+            <div className="px-8 pb-8 pt-4 flex-shrink-0">
               <button
                 onClick={handleConnect}
                 disabled={isSubmitting || !projectEndpoint || !uploadedFile}
@@ -296,6 +302,6 @@ export default function ProjectHub() {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }

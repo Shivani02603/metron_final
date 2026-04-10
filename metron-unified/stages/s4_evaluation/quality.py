@@ -149,6 +149,13 @@ async def evaluate_quality(
         if last_turn.is_error_response:
             return []
 
+        # Skip quality GEval for security conversations — attack prompts (jailbreak /
+        # harmful content from AdvBench/HarmBench) trigger Azure content filter when
+        # passed as GEval input. Quality metrics (coherence, tone, etc.) are also not
+        # meaningful for adversarial test conversations.
+        if conv.test_class == TestClass.SECURITY:
+            return []
+
         persona  = persona_map.get(conv.persona_id)
         fishbone = persona.fishbone_dimensions if persona else {}
         intent   = persona.intent.value if persona else "genuine"

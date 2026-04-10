@@ -534,6 +534,28 @@ export default function ConfigurePage() {
         </div>
       </Section>
 
+      {/* ── Functional Tests ──────────────────────────────── */}
+      <Section title="Functional Tests" icon="science">
+        <p className="text-xs text-[var(--color-on-surface-variant)] opacity-70 -mt-2">Run on every functional conversation to measure core response quality.</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          {[
+            { label: "Hallucination",    icon: "psychology_alt", note: "DeepEval HallucinationMetric" },
+            { label: "Answer Relevancy", icon: "ads_click",      note: "DeepEval AnswerRelevancyMetric" },
+            { label: "Usefulness",       icon: "thumb_up",       note: "DeepEval GEval" },
+            { label: "LLM Judge",        icon: "gavel",          note: "Relevance · Accuracy · Helpfulness (domain-specific)" },
+          ].map((t) => (
+            <div key={t.label} className="flex items-center gap-3 p-3 rounded-xl bg-[var(--color-surface-container-low)] border border-[var(--color-outline-variant)]">
+              <span className="material-symbols-outlined text-base text-primary">{t.icon}</span>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-[var(--color-on-surface)]">{t.label}</p>
+                <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-60">{t.note}</p>
+              </div>
+              <span className="material-symbols-outlined text-sm text-secondary ml-auto">check_circle</span>
+            </div>
+          ))}
+        </div>
+      </Section>
+
       {/* ── Security Tests ─────────────────────────────────── */}
       <Section title="Security Tests" icon="security">
         <p className="text-xs text-[var(--color-on-surface-variant)] opacity-70 -mt-2">These evaluations always run on every conversation.</p>
@@ -602,6 +624,28 @@ export default function ConfigurePage() {
             ))}
           </div>
         )}
+      </Section>
+
+      {/* ── Load & Performance ────────────────────────────── */}
+      <Section title="Load & Performance" icon="speed">
+        <p className="text-xs text-[var(--color-on-surface-variant)] opacity-70 -mt-2">Measures response time and throughput. No external tools required — built-in async HTTP timing.</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          {[
+            { label: "Response Latency",  icon: "timer",         note: "avg · p50 · p95 · p99 ms" },
+            { label: "Throughput",        icon: "trending_up",   note: "Requests per second" },
+            { label: "Error Rate",        icon: "error_outline", note: "% failed requests" },
+            { label: "Concurrent Load",   icon: "group",         note: `${loadUsers} virtual users · ${loadDuration}s` },
+          ].map((t) => (
+            <div key={t.label} className="flex items-center gap-3 p-3 rounded-xl bg-[var(--color-surface-container-low)] border border-[var(--color-outline-variant)]">
+              <span className="material-symbols-outlined text-base text-[var(--color-tertiary,#855300)]">{t.icon}</span>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-[var(--color-on-surface)]">{t.label}</p>
+                <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-60">{t.note}</p>
+              </div>
+              <span className="material-symbols-outlined text-sm text-secondary ml-auto">check_circle</span>
+            </div>
+          ))}
+        </div>
       </Section>
 
       {/* ── Actions ────────────────────────────────────────── */}

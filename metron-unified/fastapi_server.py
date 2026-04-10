@@ -127,36 +127,6 @@ async def get_tools_status():
         "used_for": "ragas_faithfulness in quality evaluation (RAG mode only)",
     }
 
-    # ROUGE
-    rouge_ok = _check("rouge_score")
-    tools["rouge_score"] = {
-        "installed": rouge_ok,
-        "description": "ROUGE-L text similarity (no LLM)",
-        "used_for": "rouge_l metric in functional evaluation",
-    }
-
-    # BERTScore
-    bert_ok = _check("bert_score")
-    tools["bert_score"] = {
-        "installed": bert_ok,
-        "description": "BERTScore semantic similarity (no LLM)",
-        "used_for": "bert_score_f1 metric in functional evaluation",
-    }
-
-    # Garak (optional)
-    tools["garak"] = {
-        "installed": _check("garak"),
-        "description": "LLM vulnerability scanner (optional — heavy dependency)",
-        "used_for": "advanced red-teaming (not active in current pipeline)",
-    }
-
-    # Neo4j (optional)
-    tools["neo4j"] = {
-        "installed": _check("neo4j"),
-        "description": "Persona registry (optional — caches personas across runs)",
-        "used_for": "persona caching in stage 1",
-    }
-
     return tools
 
 

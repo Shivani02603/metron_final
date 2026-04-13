@@ -235,12 +235,43 @@ async def run_tests(
     background_tasks: BackgroundTasks,
     config: str = Form(...),
     document: Optional[UploadFile] = File(None),
+    ground_truth_file: Optional[UploadFile] = File(None),
 ):
-    import json
+    import json, csv, io
     try:
         config_data = json.loads(config)
     except json.JSONDecodeError:
         raise HTTPException(400, "Invalid config JSON")
+
+    # Parse ground truth file (CSV or JSON) into list of {question, expected_answer, context}
+    if ground_truth_file:
+        try:
+            raw = (await ground_truth_file.read()).decode("utf-8", errors="ignore")
+            filename = ground_truth_file.filename or ""
+            if filename.endswith(".json"):
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    config_data["ground_truth"] = [
+                        {
+                            "question":        str(r.get("question", r.get("q", ""))),
+                            "expected_answer": str(r.get("expected_answer", r.get("answer", r.get("a", "")))),
+                            "context":         str(r.get("context", "")),
+                        }
+                        for r in parsed if r
+                    ]
+            else:
+                # CSV: header row with question, expected_answer, context columns
+                reader = csv.DictReader(io.StringIO(raw))
+                pairs = []
+                for row in reader:
+                    q = row.get("question") or row.get("q") or ""
+                    a = row.get("expected_answer") or row.get("answer") or row.get("a") or ""
+                    c = row.get("context") or ""
+                    if q and a:
+                        pairs.append({"question": q.strip(), "expected_answer": a.strip(), "context": c.strip()})
+                config_data["ground_truth"] = pairs
+        except Exception as e:
+            print(f"[API] Could not parse ground truth file: {e}")
 
     run_config = RunConfig(**config_data)
 

@@ -30,6 +30,7 @@ from stages.s4_evaluation.security import evaluate_security
 from stages.s4_evaluation.quality import evaluate_quality
 from stages.s4_evaluation.performance import evaluate_performance
 from stages.s4_evaluation.load import evaluate_load
+from stages.s4_evaluation.rag import evaluate_rag
 from stages.s5_aggregation.aggregator import aggregate
 from stages.s6_feedback.feedback_loop import run_feedback_loop
 from stages.s7_report.report_generator import report_to_json, generate_html_report
@@ -122,9 +123,13 @@ async def run_pipeline(
         _update(job_store, run_id, 20, "Generating domain-specific test prompts…", "test_gen")
         _log(job_store, run_id, "phase_start", {"phase": "test_gen", "label": "Test Generation"})
 
-        # 2a: Functional prompts — pass rag_text so expected_behavior is grounded in knowledge base
+        # 2a: Functional prompts — RAG mode uses ground truth Q&A pairs if provided
         rag_text = config.rag_text if config.is_rag else ""
-        func_prompts = await generate_all_functional(personas, profile, llm_client, rag_text=rag_text)
+        func_prompts = await generate_all_functional(
+            personas, profile, llm_client,
+            rag_text=rag_text,
+            ground_truth=config.ground_truth if config.is_rag else [],
+        )
 
         # 2b: Security prompts (adversarial personas only)
         sec_prompts = await generate_all_security(
@@ -205,7 +210,19 @@ async def run_pipeline(
             evaluate_quality(conversations, personas, config, llm_client, quality_criteria),
         )
 
-        all_metric_results = func_results + sec_results + qual_results
+        # RAG evaluation (only in RAG mode)
+        rag_results: List[MetricResult] = []
+        if config.is_rag:
+            _update(job_store, run_id, 70, "Running RAG evaluation (faithfulness, recall, precision)…", "rag")
+            _log(job_store, run_id, "phase_start", {"phase": "rag", "label": "RAG Evaluation"})
+            try:
+                rag_results = await evaluate_rag(conversations, personas, config, llm_client)
+            except Exception as rag_err:
+                print(f"[Pipeline] RAG evaluation failed: {rag_err}")
+            _update(job_store, run_id, 71, f"RAG: {len(rag_results)} metrics evaluated", "rag",
+                    {"count": len(rag_results), "passed": sum(1 for r in rag_results if r.passed)})
+
+        all_metric_results = func_results + sec_results + qual_results + rag_results
 
         # Emit top failures + passes for each phase (sample of 4 each)
         for phase_label, results in [("functional", func_results), ("security", sec_results), ("quality", qual_results)]:
@@ -388,6 +405,18 @@ async def run_pipeline(
         final_json["functional"] = _flat_phase("functional", func_results)
         final_json["security"]   = _flat_phase("security",   sec_results)
         final_json["quality"]    = _flat_phase("quality",    qual_results)
+        if rag_results:
+            rag_total  = len(rag_results)
+            rag_passed = sum(1 for r in rag_results if r.passed)
+            rag_avg    = sum(r.score for r in rag_results) / rag_total if rag_total else 0.0
+            final_json["rag"] = {
+                "total":     rag_total,
+                "passed":    rag_passed,
+                "failed":    rag_total - rag_passed,
+                "pass_rate": round(rag_passed / rag_total * 100, 1) if rag_total else 0.0,
+                "avg_score": round(rag_avg, 4),
+                "results":   [_to_test_result(r) for r in rag_results],
+            }
 
         # Normalize performance field names for frontend (removes _ms suffix)
         final_json["performance"] = {

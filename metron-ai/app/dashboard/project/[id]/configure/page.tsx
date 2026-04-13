@@ -45,7 +45,7 @@ export default function ConfigurePage() {
 
   // RAG
   const [isRag, setIsRag] = useState(false);
-  const [ragText, setRagText] = useState("");
+  const [groundTruthFile, setGroundTruthFile] = useState<File | null>(null);
 
   // Test params
   const [numPersonas, setNumPersonas] = useState(3);
@@ -97,7 +97,9 @@ export default function ConfigurePage() {
           setAuthType("bearer");
           setAuthToken(data.apiKey);
         }
-        if (data.documentText) setRagText(data.documentText);
+        // Knowledge base textarea removed — ground truth file is the only RAG input.
+        // The uploaded document is the system description for persona generation.
+        // The knowledge base textarea is a separate optional field for RAG faithfulness scoring.
         if (data.name) setAgentName(data.name);
       } catch (_) {}
     }
@@ -196,7 +198,7 @@ export default function ConfigurePage() {
       agent_domain: agentDomain,
       agent_description: agentDescription,
       is_rag: isRag,
-      rag_text: isRag ? ragText : "",
+      rag_text: "",
       num_personas: numPersonas,
       num_scenarios: numScenarios,
       conversation_turns: convTurns,
@@ -215,6 +217,19 @@ export default function ConfigurePage() {
     };
 
     sessionStorage.setItem(`fullconfig_${projectId}`, JSON.stringify(fullConfig));
+
+    // Store ground truth file content for the preview page to attach
+    if (isRag && groundTruthFile) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        sessionStorage.setItem(`ground_truth_${projectId}`, reader.result as string);
+        sessionStorage.setItem(`ground_truth_name_${projectId}`, groundTruthFile.name);
+      };
+      reader.readAsText(groundTruthFile);
+    } else {
+      sessionStorage.removeItem(`ground_truth_${projectId}`);
+      sessionStorage.removeItem(`ground_truth_name_${projectId}`);
+    }
 
     // Generate personas/scenarios only if not already done
     if (personas.length === 0) {
@@ -455,14 +470,38 @@ export default function ConfigurePage() {
           <span className="text-sm font-semibold text-[var(--color-on-surface)]">This is a RAG Agent</span>
         </label>
         {isRag && (
-          <Field label="Ground Truth / Knowledge Base">
-            <textarea
-              className="input-field resize-none h-[140px] font-mono text-xs"
-              placeholder="Paste your ground truth documents or knowledge base content here…"
-              value={ragText}
-              onChange={(e) => setRagText(e.target.value)}
-            />
-          </Field>
+          <div className="space-y-5">
+            <Field label="Ground Truth File — question, expected_answer & context (CSV or JSON)">
+              <p className="text-xs text-[var(--color-on-surface-variant)] opacity-70 mb-3">
+                Each row/object must have <strong>question</strong>, <strong>expected_answer</strong>, and <strong>context</strong> fields.
+                Context is used as the sole source of truth for faithfulness, recall &amp; precision scoring.
+              </p>
+              <div className="relative group p-5 border-2 border-dashed border-[var(--color-outline-variant)] border-opacity-30 rounded-2xl bg-[var(--color-surface-container-low)]/50 hover:border-primary/50 hover:bg-primary/5 transition-all text-center cursor-pointer">
+                <input
+                  type="file"
+                  accept=".csv,.json"
+                  className="absolute inset-0 opacity-0 cursor-pointer z-10"
+                  onChange={(e) => setGroundTruthFile(e.target.files?.[0] || null)}
+                />
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center mx-auto mb-2 transition-all ${groundTruthFile ? "bg-[#6bff8f] text-[#006e2f]" : "bg-primary/10 text-primary"}`}>
+                  <span className="material-symbols-outlined text-xl">{groundTruthFile ? "task_alt" : "upload_file"}</span>
+                </div>
+                {groundTruthFile ? (
+                  <div>
+                    <p className="font-bold text-sm text-on-surface truncate">{groundTruthFile.name}</p>
+                    <p className="text-[10px] font-bold text-[#006e2f] uppercase tracking-widest mt-0.5">Ready</p>
+                  </div>
+                ) : (
+                  <div>
+                    <p className="text-sm font-semibold text-on-surface">Upload ground truth file</p>
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-outline opacity-50 mt-0.5">
+                      CSV: question, expected_answer, context &nbsp;·&nbsp; JSON: [{"{"}question, expected_answer, context{"}"}]
+                    </p>
+                  </div>
+                )}
+              </div>
+            </Field>
+          </div>
         )}
       </Section>
 

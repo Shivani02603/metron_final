@@ -19,6 +19,8 @@ openai>=1.12.0          # Azure OpenAI
 # ── Evaluation: LLM quality frameworks ───────────────────────────────────────
 deepeval>=0.21.0
 ragas>=0.1.0
+langchain-openai>=0.1.0     # required by RAGAS for Azure OpenAI LLM wrapper
+langchain>=0.1.0            # required by ragas internally
 
 # ── Security: PII detection ───────────────────────────────────────────────────
 presidio-analyzer>=2.2.0

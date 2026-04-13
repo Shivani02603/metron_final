@@ -192,15 +192,59 @@ async def generate_performance_prompts(
     return generated
 
 
+def _ground_truth_to_prompts(
+    ground_truth: list,
+    personas: List[Persona],
+) -> List[GeneratedPrompt]:
+    """
+    Convert ground truth Q&A pairs directly into GeneratedPrompts.
+    Distributes pairs across genuine personas (round-robin).
+    Used in RAG mode when the user provides a ground truth file.
+    """
+    genuine = [p for p in personas if p.intent.value == "genuine"] or personas
+    prompts = []
+    for i, pair in enumerate(ground_truth):
+        question = pair.get("question", "").strip()
+        expected = pair.get("expected_answer", "").strip()
+        if not question:
+            continue
+        persona = genuine[i % len(genuine)]
+        # Parse context — may be a string (single chunk) or list
+        raw_ctx = pair.get("context", "")
+        if isinstance(raw_ctx, list):
+            ctx_chunks = [str(c) for c in raw_ctx if c]
+        elif raw_ctx:
+            ctx_chunks = [raw_ctx]
+        else:
+            ctx_chunks = None
+
+        prompts.append(GeneratedPrompt(
+            persona_id=persona.persona_id,
+            test_class=TestClass.FUNCTIONAL,
+            text=question,
+            expected_behavior=expected,        # used by functional evaluator
+            expected_answer=expected,          # used by RAG evaluator
+            ground_truth_context=ctx_chunks,   # used by RAGAS — provided by user
+            turn_number=1,
+        ))
+    return prompts
+
+
 async def generate_all_functional(
     personas: List[Persona],
     profile: AppProfile,
     llm_client: LLMClient,
     rag_text: str = "",
+    ground_truth: list = [],
 ) -> List[GeneratedPrompt]:
     """Generate functional prompts for all personas in parallel.
-    Pass rag_text for RAG mode so expected_behavior is grounded in knowledge base.
+    In RAG mode with ground truth: uses Q&A pairs directly (no LLM generation).
+    In RAG mode without ground truth: generates via LLM grounded in knowledge base.
     """
+    from core.models import ApplicationType
+    if ground_truth and profile.application_type == ApplicationType.RAG:
+        return _ground_truth_to_prompts(ground_truth, personas)
+
     sem = asyncio.Semaphore(5)
 
     async def _bounded(persona):

@@ -19,12 +19,19 @@ const METRIC_LABELS: Record<string, string> = {
   bias_fairness:          "Bias & Fairness",
   toxic_request:          "Toxic Request",
   attack_resistance:      "Attack Resistance",
-  // Quality / RAG
+  // Quality
   geval_overall:          "GEval Overall",
   ragas_faithfulness:     "Faithfulness (RAGAS)",
   ragas_answer_relevancy: "Answer Relevancy (RAGAS)",
   ragas_context_recall:   "Context Recall (RAGAS)",
   ragas_context_precision:"Context Precision (RAGAS)",
+  // RAG evaluation — RAGAS
+  rag_faithfulness:       "Faithfulness (RAGAS)",
+  rag_context_recall:     "Context Recall (RAGAS)",
+  rag_context_precision:  "Context Precision (RAGAS)",
+  // RAG evaluation — DeepEval
+  rag_answer_relevancy:   "Answer Relevancy (DeepEval)",
+  rag_context_relevancy:  "Context Relevancy (DeepEval)",
 };
 
 function metricLabel(name: string): string {
@@ -99,6 +106,7 @@ interface FullResults {
   functional: PhaseSummary;
   security: PhaseSummary;
   quality: PhaseSummary;
+  rag?: PhaseSummary;
   performance: PerformanceMetrics;
   load: LoadMetrics;
   personas: Array<{ id: string; name: string; description: string; traits: string[] }>;
@@ -284,7 +292,11 @@ Health Score: ${(r.health_score * 100).toFixed(1)}% | ${r.passed ? "PASSED" : "F
   const healthPct = Math.round(results.health_score * 100);
   const healthColor = healthPct >= 70 ? "text-secondary" : healthPct >= 40 ? "text-[#855300]" : "text-error";
 
-  const TABS = ["Functional", "Security", "Quality", "Performance", "Load Test", "Export"];
+  const TABS = [
+    "Functional", "Security", "Quality",
+    ...(results.rag ? ["RAG"] : []),
+    "Performance", "Load Test", "Export",
+  ];
 
   return (
     <div className="max-w-5xl mx-auto pb-20 space-y-8 animate-fade-in">
@@ -354,14 +366,15 @@ Health Score: ${(r.health_score * 100).toFixed(1)}% | ${r.passed ? "PASSED" : "F
           {/* ── Tab 2: Quality ── */}
           {activeTab === 2 && <QualityTab data={results.quality} />}
 
-          {/* ── Tab 3: Performance ── */}
-          {activeTab === 3 && <PerformanceTab data={results.performance} />}
+          {/* ── Tab 3: RAG (only present in RAG mode) ── */}
+          {results.rag && activeTab === 3 && <RAGTab data={results.rag} />}
 
-          {/* ── Tab 4: Load ── */}
-          {activeTab === 4 && <LoadTab data={results.load} />}
+          {/* ── Performance / Load / Export shift index when RAG tab is present ── */}
+          {activeTab === (results.rag ? 4 : 3) && <PerformanceTab data={results.performance} />}
+          {activeTab === (results.rag ? 5 : 4) && <LoadTab data={results.load} />}
 
-          {/* ── Tab 5: Export ── */}
-          {activeTab === 5 && (
+          {/* ── Export ── */}
+          {activeTab === (results.rag ? 6 : 5) && (
             <div className="space-y-4">
               <p className="text-sm text-[var(--color-on-surface-variant)] opacity-70">Download the test results in various formats.</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -696,6 +709,98 @@ function QualityTab({ data }: { data: PhaseSummary }) {
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+// ─────────────────────── RAG Tab ──────────────────────────────────────────
+function RAGTab({ data }: { data: PhaseSummary }) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  if (!data?.results) return <EmptyState />;
+
+  const toggle = (id: string) => setExpanded((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  const RAG_METRIC_ICONS: Record<string, string> = {
+    rag_faithfulness:      "verified",
+    rag_context_relevancy: "manage_search",
+    rag_context_recall:    "library_books",
+    rag_context_precision: "target",
+  };
+
+  const byMetric = data.results.reduce<Record<string, TestResult[]>>((acc, r) => {
+    (acc[r.category] = acc[r.category] || []).push(r);
+    return acc;
+  }, {});
+
+  return (
+    <div className="space-y-6">
+      <SummaryRow4
+        items={[
+          { label: "Total", value: data.total },
+          { label: "Passed", value: data.passed, color: "text-secondary" },
+          { label: "Failed", value: data.failed, color: "text-error" },
+          { label: "Avg Score", value: `${(data.avg_score * 100).toFixed(1)}%` },
+        ]}
+      />
+
+      {/* Per-metric summary cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {Object.entries(byMetric).map(([metricKey, items]) => {
+          const avg = items.reduce((s, r) => s + r.score, 0) / items.length;
+          const passed = items.filter((r) => r.passed).length;
+          return (
+            <div key={metricKey} className="card p-4 text-center space-y-1">
+              <span className="material-symbols-outlined text-xl text-primary">
+                {RAG_METRIC_ICONS[metricKey] || "analytics"}
+              </span>
+              <p className="font-headline text-2xl font-black text-[var(--color-on-surface)]">{(avg * 100).toFixed(0)}%</p>
+              <p className="text-[9px] font-black uppercase tracking-widest text-[var(--color-on-surface-variant)] opacity-60">
+                {metricLabel(metricKey)}
+              </p>
+              <p className="text-[10px] text-secondary font-bold">{passed}/{items.length} passed</p>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Per-question breakdown */}
+      <div className="space-y-3">
+        {data.results.map((r) => (
+          <div key={r.test_id} className="border border-[var(--color-outline-variant)] rounded-xl overflow-hidden">
+            <button
+              onClick={() => toggle(r.test_id)}
+              className="w-full flex items-center justify-between p-4 hover:bg-[var(--color-surface-container-low)] transition-colors"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <span className={`material-symbols-outlined text-base flex-shrink-0 ${r.passed ? "text-secondary" : "text-error"}`}>
+                  {r.passed ? "check_circle" : "cancel"}
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs font-black text-[var(--color-on-surface-variant)] opacity-60 uppercase tracking-wider">{metricLabel(r.category)}</p>
+                  <p className="text-sm font-bold truncate">{r.input_text.slice(0, 80)}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <span className={`text-xs font-black ${r.passed ? "text-secondary" : "text-error"}`}>{(r.score * 100).toFixed(0)}%</span>
+                <span className="material-symbols-outlined text-base text-[var(--color-on-surface-variant)]">
+                  {expanded.has(r.test_id) ? "expand_less" : "expand_more"}
+                </span>
+              </div>
+            </button>
+            {expanded.has(r.test_id) && (
+              <div className="px-4 pb-4 space-y-3 border-t border-[var(--color-outline-variant)]">
+                <ConversationBlock input={r.input_text} output={r.output_text} inputLabel="Question" outputLabel="RAG Answer" />
+                {r.reasoning && (
+                  <div className="p-3 rounded-lg bg-[var(--color-surface-container-low)]">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-on-surface-variant)] opacity-60 mb-1">Evaluation</p>
+                    <p className="text-xs">{r.reasoning}</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

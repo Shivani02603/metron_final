@@ -66,51 +66,111 @@ async def _ragas_full(
     ground_truth: str,
 ) -> dict[str, tuple[float, str]]:
     """
-    Run all available RAGAS metrics.
+    Run all available RAGAS metrics (supports 0.4.x and 0.1.x API).
     - faithfulness + answer_relevancy: always (no ground_truth needed)
     - context_recall + context_precision: only when ground_truth present
     Returns dict of metric_name → (score, method).
     Raises on failure — caller handles.
     """
-    from ragas import evaluate as ragas_evaluate
-    from ragas.metrics import faithfulness as r_faith, answer_relevancy as r_rel
-    from datasets import Dataset   # type: ignore
+    import os
+    from ragas import evaluate as ragas_evaluate  # type: ignore
+    from ragas.metrics import faithfulness as r_faith  # type: ignore
+    from ragas.llms import LangchainLLMWrapper  # type: ignore
+    from langchain_openai import AzureChatOpenAI  # type: ignore
 
-    ctx = context[:3]
-    metrics_to_run = [r_faith, r_rel]
-    data: dict = {
-        "question": [query],
-        "answer":   [response],
-        "contexts": [ctx],
-    }
+    azure_llm = AzureChatOpenAI(
+        azure_deployment=os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o"),
+        api_version=os.environ.get("OPENAI_API_VERSION", "2024-02-15-preview"),
+        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+        api_key=os.environ["AZURE_OPENAI_API_KEY"],
+        temperature=0,
+        max_tokens=1024,
+    )
+    ragas_llm = LangchainLLMWrapper(azure_llm)
 
+    ctx = (context[:3] or [""])
     has_gt = bool(ground_truth and ground_truth.strip())
+
+    # Configure metrics with Azure LLM
+    r_faith.llm = ragas_llm
+    metrics_to_run = [r_faith]
+
+    try:
+        from ragas.metrics import answer_relevancy as r_rel  # type: ignore
+        r_rel.llm = ragas_llm
+        metrics_to_run.append(r_rel)
+    except (ImportError, AttributeError):
+        pass
+
     if has_gt:
         try:
-            from ragas.metrics import context_recall as r_recall, context_precision as r_prec
+            from ragas.metrics import context_recall as r_recall, context_precision as r_prec  # type: ignore
+            r_recall.llm = ragas_llm
+            r_prec.llm   = ragas_llm
             metrics_to_run += [r_recall, r_prec]
-            data["ground_truth"] = [ground_truth]
-        except ImportError:
+        except (ImportError, AttributeError):
             pass
 
-    ds = Dataset.from_dict(data)
+    # Build dataset — try RAGAS 0.4.x EvaluationDataset first
+    try:
+        from ragas import EvaluationDataset, SingleTurnSample  # type: ignore
+        sample = SingleTurnSample(
+            user_input=query,
+            response=response,
+            retrieved_contexts=ctx,
+            reference=ground_truth if has_gt else None,
+        )
+        ds = EvaluationDataset(samples=[sample])
+    except (ImportError, AttributeError):
+        from datasets import Dataset  # type: ignore
+        data: dict = {
+            "question": [query],
+            "answer":   [response],
+            "contexts": [ctx],
+        }
+        if has_gt:
+            data["ground_truth"] = [ground_truth]
+        ds = Dataset.from_dict(data)
+
     loop = asyncio.get_event_loop()
 
-    def _run_ragas():
+    def _run():
         return ragas_evaluate(ds, metrics=metrics_to_run)
 
-    result = await loop.run_in_executor(None, _run_ragas)
+    result = await loop.run_in_executor(None, _run)
 
-    results: dict[str, tuple[float, str]] = {}
-    if "faithfulness" in result:
-        results["ragas_faithfulness"]       = (round(float(result["faithfulness"]), 4),       "ragas")
-    if "answer_relevancy" in result:
-        results["ragas_answer_relevancy"]   = (round(float(result["answer_relevancy"]), 4),   "ragas")
-    if "context_recall" in result:
-        results["ragas_context_recall"]     = (round(float(result["context_recall"]), 4),     "ragas")
-    if "context_precision" in result:
-        results["ragas_context_precision"]  = (round(float(result["context_precision"]), 4),  "ragas")
-    return results
+    # Extract scores — handle both dict-like (0.1.x) and DataFrame (0.4.x) results
+    import math
+    out: dict[str, tuple[float, str]] = {}
+    try:
+        df = result.to_pandas()
+        col_map = {
+            "faithfulness":      "ragas_faithfulness",
+            "answer_relevancy":  "ragas_answer_relevancy",
+            "context_recall":    "ragas_context_recall",
+            "context_precision": "ragas_context_precision",
+        }
+        row = df.iloc[0]
+        for col, metric_name in col_map.items():
+            if col in df.columns:
+                raw = row[col]
+                score = float(raw) if (raw == raw and not (isinstance(raw, float) and math.isnan(raw))) else 0.0
+                out[metric_name] = (round(score, 4), "ragas")
+    except Exception:
+        # Fallback: access result as dict (ragas 0.1.x)
+        for col, metric_name in [
+            ("faithfulness",     "ragas_faithfulness"),
+            ("answer_relevancy", "ragas_answer_relevancy"),
+            ("context_recall",   "ragas_context_recall"),
+            ("context_precision","ragas_context_precision"),
+        ]:
+            try:
+                val = result[col]
+                if val is not None and not (isinstance(val, float) and math.isnan(val)):
+                    out[metric_name] = (round(float(val), 4), "ragas")
+            except (KeyError, TypeError):
+                pass
+    return out
 
 
 # ── Main evaluator ────────────────────────────────────────────────────────────
@@ -123,6 +183,8 @@ async def evaluate_quality(
     quality_criteria: Optional[dict] = None,
 ) -> List[MetricResult]:
     """Evaluate quality using DeepEval GEval + RAGAS (tool-only, no LLM fallback)."""
+    from stages.s4_evaluation.functional import _set_azure_env
+    _set_azure_env(config)
 
     deval_model = make_deepeval_azure_model()
 

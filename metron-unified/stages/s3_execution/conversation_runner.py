@@ -23,6 +23,7 @@ from core.models import (
     ConversationTurn, GeneratedPrompt, Persona, ResponseType, RunConfig, TestClass,
 )
 
+
 MAX_TURNS = 3   # Turn 1 free (entry_point), Turns 2-3 via combined eval+generate
 
 COMBINED_TURN_PROMPT = """
@@ -133,13 +134,21 @@ async def run_conversation(
         is_security = (prompt.test_class == TestClass.SECURITY)
 
         # Build turn record — carry expected_behavior from prompt (turn 1 only; turns 2+ don't have it)
+        # For RAG mode: always use ground truth context provided by user.
+        # Endpoint-returned context is ignored — ground truth is the single source of truth.
+        effective_context = (
+            prompt.ground_truth_context if turn_num == 1 and prompt.ground_truth_context
+            else resp.retrieved_context
+        )
+
         turn = ConversationTurn(
             turn_number=turn_num,
             query=current_message,
             response=resp.text if resp.ok else f"[Error: {resp.error}]",
             latency_ms=latency_ms,
             expected_behavior=prompt.expected_behavior if turn_num == 1 else None,
-            retrieved_context=resp.retrieved_context,
+            expected_answer=prompt.expected_answer if turn_num == 1 else None,
+            retrieved_context=effective_context,
             agent_trace=resp.agent_trace,
             persona_state=current_state,
             is_error_response=is_error and not is_security,
@@ -150,6 +159,12 @@ async def run_conversation(
 
         history_lines.append(f"User: {current_message}")
         history_lines.append(f"AI: {turn.response[:300]}")
+
+        # RAG: single question → single answer, no follow-up turns needed.
+        is_rag = (config.application_type == ApplicationType.RAG)
+        if is_rag:
+            conversation.goal_achieved = not is_error
+            break
 
         # Stop early: last turn reached, or chatbot returned an error/bad field.
         # Security convs also stop on error (1 turn is enough) but don't mark goal_achieved=False.

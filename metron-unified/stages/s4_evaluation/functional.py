@@ -65,6 +65,19 @@ def _configure_deepeval(llm_provider: str, llm_api_key: str) -> None:
         pass
 
 
+def _set_azure_env(config: RunConfig) -> None:
+    """
+    Ensure Azure OpenAI env vars are populated for RAGAS and DeepEval tool calls.
+    Reads from RunConfig.llm_api_key when provider is Azure, falls back to existing env.
+    Also sets OPENAI_API_VERSION which langchain_openai requires.
+    """
+    import os
+    provider = (config.llm_provider or "").lower()
+    if "azure" in provider and config.llm_api_key:
+        os.environ.setdefault("AZURE_OPENAI_API_KEY", config.llm_api_key)
+    os.environ.setdefault("OPENAI_API_VERSION", os.environ.get("AZURE_API_VERSION", "2025-01-01-preview"))
+
+
 # ── DeepEval metric helpers (no fallback — let exceptions propagate) ──────────
 
 def _deepeval_hallucination(query: str, response: str, context: list, model) -> tuple[float, str]:

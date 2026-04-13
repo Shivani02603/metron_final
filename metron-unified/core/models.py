@@ -97,8 +97,9 @@ class RunConfig(BaseModel):
     application_type:  ApplicationType = ApplicationType.CHATBOT
 
     # RAG
-    is_rag:   bool = False
-    rag_text: str  = ""
+    is_rag:       bool = False
+    rag_text:     str  = ""
+    ground_truth: List[Dict[str, str]] = []   # [{"question": ..., "expected_answer": ...}]
 
     # Test parameters
     num_personas:           int  = 3
@@ -174,8 +175,10 @@ class GeneratedPrompt(BaseModel):
     persona_id:        str
     test_class:        TestClass
     text:              str
-    expected_behavior: Optional[str] = None
-    attack_category:   Optional[str] = None   # security only
+    expected_behavior:    Optional[str]       = None
+    expected_answer:      Optional[str]       = None        # RAG ground truth exact answer
+    ground_truth_context: Optional[List[str]] = None        # RAG ground truth context chunks
+    attack_category:      Optional[str]       = None        # security only
     owasp_category:    Optional[str] = None   # e.g. "LLM01_prompt_injection"
     severity:          Optional[str] = None   # critical/high/medium
     compliance_tags:   List[str] = []
@@ -190,6 +193,7 @@ class ConversationTurn(BaseModel):
     response:           str
     latency_ms:         float
     expected_behavior:  Optional[str] = None         # ground truth from Stage 2
+    expected_answer:    Optional[str] = None         # RAG ground truth exact answer
     tokens_input:       Optional[int] = None
     tokens_output:      Optional[int] = None
     retrieved_context:  Optional[List[str]] = None   # RAG only

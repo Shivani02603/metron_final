@@ -109,11 +109,19 @@ export default function PreviewPage() {
         application_type: cfg.application_type || "chatbot",
       }));
 
-      // Attach RAG document if present
+      // Attach RAG knowledge base document if present
       const ragText = cfg.rag_text as string;
       if (ragText) {
         const blob = new Blob([ragText], { type: "text/plain" });
         formData.append("document", new File([blob], "knowledge.txt"));
+      }
+
+      // Attach ground truth file if present (RAG mode)
+      const gtText = sessionStorage.getItem(`ground_truth_${projectId}`);
+      const gtName = sessionStorage.getItem(`ground_truth_name_${projectId}`) || "ground_truth.csv";
+      if (gtText) {
+        const gtBlob = new Blob([gtText], { type: "text/plain" });
+        formData.append("ground_truth_file", new File([gtBlob], gtName));
       }
 
       const controller = new AbortController();

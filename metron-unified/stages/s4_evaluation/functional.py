@@ -78,6 +78,55 @@ def _set_azure_env(config: RunConfig) -> None:
     os.environ.setdefault("OPENAI_API_VERSION", os.environ.get("AZURE_API_VERSION", "2025-01-01-preview"))
 
 
+def _build_azure_langchain_llm():
+    """
+    Build an AzureChatOpenAI client for RAGAS / LangChain, correctly handling
+    both endpoint formats that may be present in AZURE_OPENAI_ENDPOINT:
+
+      Full URL  (what the .env currently stores):
+        https://resource.cognitiveservices.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2025-01-01-preview
+
+      Base URL  (what AzureChatOpenAI actually expects):
+        https://resource.cognitiveservices.azure.com/
+
+    This function always normalises to the base URL, extracts the deployment
+    and api-version from the URL when the explicit env vars are absent, so
+    callers never need to care which format is in the environment.
+    """
+    import os, re
+    from langchain_openai import AzureChatOpenAI  # type: ignore
+
+    raw = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+
+    # Strip to scheme + host so AzureChatOpenAI can append its own path.
+    base_match = re.match(r"(https?://[^/]+)", raw)
+    base_endpoint = (base_match.group(1) + "/") if base_match else raw
+
+    # Pull deployment from the URL path when AZURE_OPENAI_DEPLOYMENT_NAME is absent.
+    dep_match = re.search(r"/deployments/([^/?]+)", raw)
+    deployment = (
+        os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME")
+        or (dep_match.group(1) if dep_match else "gpt-4o")
+    )
+
+    # Pull api-version from the query string when the env var is absent.
+    ver_match = re.search(r"api-version=([^&\s]+)", raw)
+    api_version = (
+        os.environ.get("OPENAI_API_VERSION")
+        or os.environ.get("AZURE_API_VERSION")
+        or (ver_match.group(1) if ver_match else "2025-01-01-preview")
+    )
+
+    return AzureChatOpenAI(
+        azure_deployment=deployment,
+        api_version=api_version,
+        azure_endpoint=base_endpoint,
+        api_key=os.environ.get("AZURE_OPENAI_API_KEY", ""),
+        temperature=0,
+        max_tokens=1024,
+    )
+
+
 # ── DeepEval metric helpers (no fallback — let exceptions propagate) ──────────
 
 def _deepeval_hallucination(query: str, response: str, context: list, model) -> tuple[float, str]:

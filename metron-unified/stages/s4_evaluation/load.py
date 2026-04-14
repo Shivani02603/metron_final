@@ -271,6 +271,8 @@ async def evaluate_load(config: RunConfig) -> Dict[str, Any]:
             print(f"[Load] Locust timed out after {timeout}s — attempting partial CSV parse...")
             try:
                 metrics = _parse_locust_csv(csv_prefix)
+                metrics["concurrent_users"] = num_users
+                metrics["duration_seconds"] = duration_s
                 metrics["warning"] = f"Partial results: Locust timed out after {timeout}s"
                 print(f"[Load] Partial results recovered from CSV.")
                 return metrics
@@ -290,6 +292,9 @@ async def evaluate_load(config: RunConfig) -> Dict[str, Any]:
             raise RuntimeError(f"Locust subprocess failed (exit {proc_result.returncode}): {stderr_text[-500:]}")
 
         metrics = _parse_locust_csv(csv_prefix)
+        # Inject config values that _parse_locust_csv cannot know from the CSV
+        metrics["concurrent_users"] = num_users
+        metrics["duration_seconds"] = duration_s
         print(
             f"[Load] Locust complete — {metrics['total_requests']} requests, "
             f"p95={metrics['p95_latency_ms']}ms, "

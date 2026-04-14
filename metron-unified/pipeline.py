@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.llm_client import LLMClient
 from core.models import (
-    AppProfile, AggregatedReport, Conversation, GeneratedPrompt,
+    AppProfile, AggregatedReport, ApplicationType, Conversation, GeneratedPrompt,
     MetricResult, Persona, RunConfig,
 )
 
@@ -82,6 +82,10 @@ async def run_pipeline(
             # Override app type from config if explicitly set
             if config.application_type.value != "chatbot":
                 profile.application_type = config.application_type
+            # is_rag=True must always win — the dropdown and the toggle can be
+            # out of sync when users toggle RAG without changing application_type.
+            if config.is_rag:
+                profile.application_type = ApplicationType.RAG
             if config.agent_domain:
                 profile.domain = config.agent_domain.lower()
         else:
@@ -322,7 +326,15 @@ async def run_pipeline(
                 config: RunConfig, llm_client: LLMClient,
             ) -> Tuple[List[MetricResult], List[Conversation], List[Persona]]:
                 new_personas = await build_all_personas(new_slots, profile, llm_client, project_id)
-                new_func = await generate_all_functional(new_personas, profile, llm_client, rag_text=rag_text)
+                # Pass ground_truth so the feedback pass uses the same canonical
+                # question set as the first pass.  Without this, genuine personas
+                # created by the feedback loop fall through to LLM generation and
+                # produce off-topic prompts that dilute the ground-truth results.
+                new_func = await generate_all_functional(
+                    new_personas, profile, llm_client,
+                    rag_text=rag_text,
+                    ground_truth=config.ground_truth if config.is_rag else [],
+                )
                 new_sec  = await generate_all_security(new_personas, profile, llm_client,
                                                        config.selected_attacks, config.attacks_per_category)
                 new_convs = await run_all_conversations(new_personas, new_func + new_sec, config, llm_client, project_id)

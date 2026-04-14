@@ -90,8 +90,10 @@ class RAGAdapter:
                 if isinstance(item, str):
                     result.append(item)
                 elif isinstance(item, dict):
-                    # Try common text fields
-                    for key in ("text", "content", "page_content", "chunk"):
+                    # Try common text fields used by various RAG frameworks
+                    for key in ("text", "content", "page_content", "chunk",
+                                "body", "document", "value", "source", "data",
+                                "passage", "snippet"):
                         if key in item:
                             result.append(str(item[key]))
                             break

@@ -99,7 +99,7 @@ class RunConfig(BaseModel):
     # RAG
     is_rag:       bool = False
     rag_text:     str  = ""
-    ground_truth: List[Dict[str, str]] = []   # [{"question": ..., "expected_answer": ...}]
+    ground_truth: List[Dict] = []   # [{"question": ..., "expected_answer": ..., "context": str|list}]
 
     # Test parameters
     num_personas:           int  = 3

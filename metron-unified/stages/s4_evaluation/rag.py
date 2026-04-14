@@ -2,15 +2,15 @@
 Stage 4f: RAG evaluation using RAGAS + DeepEval.
 
 Tool split:
-  RAGAS    → faithfulness, context_recall, context_precision   (batch, LLM-based)
-  DeepEval → answer_relevancy, contextual_relevancy            (per-conv, LLM-based)
+  RAGAS    → non-LLM metrics first (no API calls required):
+               NonLLMContextPrecisionWithReference  (RAGAS 0.2.x+)
+               NonLLMContextRecall                  (RAGAS 0.2.x+)
+             LLM metric added only when Azure env is confirmed available:
+               Faithfulness (LLM-based, Azure GPT-4o)
+  DeepEval → answer_relevancy, contextual_relevancy (per-conv, Azure GPT-4o)
 
-Both tools route through Azure GPT-4o.
-Only runs on functional conversations where retrieved_context is present.
-context_recall and context_precision require ground truth (expected_answer on turn 1).
-
-RAGAS 0.4.x API: uses EvaluationDataset + SingleTurnSample.
-Falls back to HuggingFace Dataset (0.1.x) if new API unavailable.
+Non-LLM metrics always run regardless of Azure configuration.
+LLM metrics are additive — failure does not suppress non-LLM results.
 """
 
 from __future__ import annotations
@@ -38,19 +38,10 @@ def _base_meta(conv: Conversation, persona: Optional[Persona], query: str, respo
 
 
 def _build_azure_ragas_llm():
-    """Build a RAGAS-compatible LLM wrapper using Azure GPT-4o."""
-    from ragas.llms import LangchainLLMWrapper
-    from langchain_openai import AzureChatOpenAI
-
-    azure_llm = AzureChatOpenAI(
-        azure_deployment=os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o"),
-        api_version=os.environ.get("OPENAI_API_VERSION", "2024-02-15-preview"),
-        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-        api_key=os.environ["AZURE_OPENAI_API_KEY"],
-        temperature=0,
-        max_tokens=1024,
-    )
-    return LangchainLLMWrapper(azure_llm)
+    """Build a RAGAS-compatible LLM wrapper using the shared Azure LangChain client."""
+    from ragas.llms import LangchainLLMWrapper  # type: ignore
+    from stages.s4_evaluation.functional import _build_azure_langchain_llm
+    return LangchainLLMWrapper(_build_azure_langchain_llm())
 
 
 def _build_ragas_dataset(
@@ -117,55 +108,69 @@ def _run_ragas(
 ) -> Tuple[Optional[Any], bool, str]:
     """
     Run RAGAS evaluate() synchronously.
+
+    Metric priority:
+      1. Non-LLM metrics (no Azure required, always attempted):
+           NonLLMContextPrecisionWithReference  — requires ground_truth
+           NonLLMContextRecall                  — requires ground_truth
+      2. LLM metric (Azure required, added only when env vars are present):
+           Faithfulness
+
     Returns (result_df, has_ground_truth, status_msg).
     """
     try:
         from ragas import evaluate as ragas_evaluate  # type: ignore
-        from ragas.metrics import faithfulness  # type: ignore
-
-        ragas_llm = _build_azure_ragas_llm()
 
         has_ground_truth = any(gt.strip() for gt in ground_truths)
+        active_metrics: List[Any] = []
 
-        # Configure faithfulness metric with our Azure LLM
-        # In 0.4.x, metric instances may need to be constructed fresh with llm param,
-        # or the .llm setter still works — we try setter first, then constructor kwarg.
-        active_metrics = []
-        try:
-            faithfulness.llm = ragas_llm
-            active_metrics.append(faithfulness)
-        except AttributeError:
-            from ragas.metrics import Faithfulness  # type: ignore
-            active_metrics.append(Faithfulness(llm=ragas_llm))
-
+        # ── 1. Non-LLM metrics (zero API calls, always work if RAGAS installed) ──
         if has_ground_truth:
             try:
-                from ragas.metrics import context_recall, context_precision  # type: ignore
-                context_recall.llm    = ragas_llm
-                context_precision.llm = ragas_llm
-                active_metrics += [context_recall, context_precision]
-            except (ImportError, AttributeError):
+                from ragas.metrics import NonLLMContextPrecisionWithReference  # type: ignore
+                active_metrics.append(NonLLMContextPrecisionWithReference())
+                print("[RAG/RAGAS] Added NonLLMContextPrecisionWithReference")
+            except (ImportError, Exception) as e:
+                print(f"[RAG/RAGAS] NonLLMContextPrecisionWithReference unavailable: {e}")
+
+            try:
+                from ragas.metrics import NonLLMContextRecall  # type: ignore
+                active_metrics.append(NonLLMContextRecall())
+                print("[RAG/RAGAS] Added NonLLMContextRecall")
+            except (ImportError, Exception) as e:
+                print(f"[RAG/RAGAS] NonLLMContextRecall unavailable: {e}")
+
+        # ── 2. LLM metric: faithfulness (only when Azure env is fully set) ────────
+        azure_ready = bool(
+            os.environ.get("AZURE_OPENAI_ENDPOINT") and
+            os.environ.get("AZURE_OPENAI_API_KEY")
+        )
+        if azure_ready:
+            try:
+                ragas_llm = _build_azure_ragas_llm()
                 try:
-                    from ragas.metrics import ContextRecall, ContextPrecision  # type: ignore
-                    active_metrics += [
-                        ContextRecall(llm=ragas_llm),
-                        ContextPrecision(llm=ragas_llm),
-                    ]
-                except Exception:
-                    pass  # No recall/precision available — run faithfulness only
+                    from ragas.metrics import faithfulness  # type: ignore
+                    faithfulness.llm = ragas_llm
+                    active_metrics.append(faithfulness)
+                except AttributeError:
+                    from ragas.metrics import Faithfulness  # type: ignore
+                    active_metrics.append(Faithfulness(llm=ragas_llm))
+                print("[RAG/RAGAS] Added Faithfulness (LLM-based, Azure)")
+            except Exception as e:
+                print(f"[RAG/RAGAS] Faithfulness metric setup failed (non-LLM metrics still run): {e}")
+        else:
+            print("[RAG/RAGAS] Azure env not set — running non-LLM metrics only")
+
+        if not active_metrics:
+            return None, has_ground_truth, "No RAGAS metrics could be initialised (ground_truth required for non-LLM metrics)"
 
         dataset, column_style = _build_ragas_dataset(questions, answers, contexts, ground_truths)
-
         result = ragas_evaluate(dataset, metrics=active_metrics)
-        df     = _extract_ragas_scores(result, column_style)
+        df = _extract_ragas_scores(result, column_style)
         return df, has_ground_truth, "ok"
 
-    except KeyError as e:
-        msg = f"Azure env var missing: {e}"
-        print(f"[RAG/RAGAS] {msg}")
-        return None, False, msg
     except Exception as e:
-        msg = str(e)[:200]
+        msg = str(e)[:300]
         print(f"[RAG/RAGAS] Evaluation failed: {msg}")
         return None, False, msg
 
@@ -245,16 +250,18 @@ async def evaluate_rag(
 
     _set_azure_env(config)
 
-    # Only evaluate functional conversations that have retrieved_context
+    # Evaluate functional conversations that have retrieved_context OR an
+    # expected_answer (ground-truth based RAG where the endpoint may not return
+    # context itself — context comes from the ground_truth_context field instead).
     rag_convs = [
         c for c in conversations
         if c.test_class == TestClass.FUNCTIONAL
         and c.turns
-        and c.turns[0].retrieved_context
+        and (c.turns[0].retrieved_context or c.turns[0].expected_answer)
     ]
 
     if not rag_convs:
-        print("[RAG Eval] No conversations with retrieved_context — skipping RAG metrics.")
+        print("[RAG Eval] No functional conversations with context or expected_answer — skipping RAG metrics.")
         return []
 
     persona_map = {p.persona_id: p for p in personas}
@@ -269,7 +276,9 @@ async def evaluate_rag(
         t = conv.turns[0]
         questions.append(t.query)
         answers.append(t.response)
-        contexts.append(t.retrieved_context or [])
+        # Prefer retrieved_context from the endpoint; fall back to [""] so RAGAS
+        # doesn't crash on an empty context list.
+        contexts.append(t.retrieved_context if t.retrieved_context else [""])
         ground_truths.append(t.expected_answer or "")
 
     all_results: List[MetricResult] = []
@@ -281,10 +290,18 @@ async def evaluate_rag(
     )
 
     if df is not None:
+        # Map both LLM-based and non-LLM metric column names → frontend names.
+        # NonLLM variants share the same frontend label as their LLM counterparts
+        # so the results page shows them under the same metric regardless of which
+        # RAGAS path produced them.
         ragas_metric_cols = {
+            # LLM-based
             "faithfulness":      "rag_faithfulness",
             "context_recall":    "rag_context_recall",
             "context_precision": "rag_context_precision",
+            # Non-LLM variants (RAGAS 0.2.x+)
+            "non_llm_context_precision_with_reference": "rag_context_precision",
+            "non_llm_context_recall":                   "rag_context_recall",
         }
         for idx, conv in enumerate(rag_convs):
             persona = persona_map.get(conv.persona_id)

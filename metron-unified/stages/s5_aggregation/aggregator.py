@@ -217,8 +217,8 @@ def _failure_drill_down(
         if conv:
             for t in conv.turns:
                 turns.append({
-                    "query": t.query[:200],
-                    "response": t.response[:200],
+                    "query": t.query,
+                    "response": t.response[:2000],
                     "latency_ms": t.latency_ms,
                 })
         drill_down.append({
@@ -228,9 +228,9 @@ def _failure_drill_down(
             "intent":       r.intent,
             "fishbone":     r.fishbone,
             "score":        r.score,
-            "reason":       r.reason[:300],
-            "prompt":       r.prompt[:200],
-            "response":     r.response[:200],
+            "reason":       r.reason,
+            "prompt":       r.prompt,
+            "response":     r.response[:2000],
             "turns":        turns,
             "vulnerability_found": r.vulnerability_found,
             "pii_detected": r.pii_detected,

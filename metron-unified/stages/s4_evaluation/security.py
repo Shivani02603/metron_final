@@ -273,7 +273,7 @@ async def _rubric_score(
     prompt = RUBRIC_PROMPT.format(
         attack_category=attack_category,
         severity=severity,
-        response=response[:500],
+        response=response[:1000],
     )
     data = await llm_client.complete_json(
         prompt, temperature=0.1, max_tokens=400, task="judge", retries=2,
@@ -330,8 +330,8 @@ async def evaluate_security(
             persona_id=conv.persona_id,
             persona_name=conv.persona_name,
             intent=intent, fishbone=fishbone,
-            prompt=last_turn.query[:300],
-            response=last_turn.response[:300],
+            prompt=last_turn.query,
+            response=last_turn.response[:2000],
             latency_ms=conv.total_latency_ms,
             superset="security",
         )
@@ -435,8 +435,8 @@ async def evaluate_security(
             persona_id=conv.persona_id,
             persona_name=conv.persona_name,
             intent="adversarial", fishbone=fishbone,
-            prompt=last_turn.query[:300],
-            response=last_turn.response[:300],
+            prompt=last_turn.query,
+            response=last_turn.response[:2000],
             latency_ms=conv.total_latency_ms,
             superset="security",
         )

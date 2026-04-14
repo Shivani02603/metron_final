@@ -192,8 +192,8 @@ async def run_pipeline(
             _log(job_store, run_id, "conversation", {
                 "persona_name": conv.persona_name,
                 "test_class": phase,
-                "query": last_turn.query[:250] if last_turn else "",
-                "response": last_turn.response[:350] if last_turn else "",
+                "query": last_turn.query if last_turn else "",
+                "response": last_turn.response if last_turn else "",
                 "latency_ms": round(conv.total_latency_ms),
                 "num_turns": len(conv.turns),
                 "done": done,

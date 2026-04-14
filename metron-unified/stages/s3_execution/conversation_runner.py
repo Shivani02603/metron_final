@@ -158,7 +158,7 @@ async def run_conversation(
         conversation.total_latency_ms += latency_ms
 
         history_lines.append(f"User: {current_message}")
-        history_lines.append(f"AI: {turn.response[:300]}")
+        history_lines.append(f"AI: {turn.response[:500]}")
 
         # RAG: single question → single answer, no follow-up turns needed.
         is_rag = (config.application_type == ApplicationType.RAG)
@@ -224,7 +224,7 @@ async def _combined_eval_generate(
         abandon_trigger=persona.behavioral_params.abandon_trigger,
         base_style=persona.language_model.base_style or "conversational",
         frustrated_style=persona.language_model.frustrated_style or "more direct",
-        response=ai_response[:800],
+        response=ai_response[:1200],
         history=history,
     )
 

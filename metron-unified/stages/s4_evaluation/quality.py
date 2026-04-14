@@ -229,8 +229,8 @@ async def evaluate_quality(
             persona_id=conv.persona_id,
             persona_name=conv.persona_name,
             intent=intent, fishbone=fishbone,
-            prompt=last_turn.query[:300],
-            response=last_turn.response[:300],
+            prompt=last_turn.query,
+            response=last_turn.response[:2000],
             latency_ms=conv.total_latency_ms,
             superset="quality",
         )

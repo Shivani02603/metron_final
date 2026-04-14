@@ -242,7 +242,12 @@ async def generate_all_functional(
     In RAG mode without ground truth: generates via LLM grounded in knowledge base.
     """
     from core.models import ApplicationType
-    if ground_truth and profile.application_type == ApplicationType.RAG:
+    # Use ground truth Q&A pairs directly whenever they are provided — do not
+    # re-check profile.application_type here because the profile may still carry
+    # ApplicationType.CHATBOT if the user toggled is_rag without updating the
+    # application_type dropdown.  ground_truth is only populated in pipeline.py
+    # when config.is_rag is True, so this check is sufficient.
+    if ground_truth:
         return _ground_truth_to_prompts(ground_truth, personas)
 
     sem = asyncio.Semaphore(5)

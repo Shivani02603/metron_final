@@ -250,26 +250,99 @@ async def run_tests(
             filename = ground_truth_file.filename or ""
             if filename.endswith(".json"):
                 parsed = json.loads(raw)
+
+                # ── Locate the list of Q&A pairs regardless of JSON shape ──────
+                # Supported shapes:
+                #   1. Root array:          [{"question": ...}, ...]
+                #   2. Root object/wrapper: {"test_cases": [...]} or
+                #                          {"data": [...]} or
+                #                          {"questions": [...]} etc.
+                rows = None
                 if isinstance(parsed, list):
-                    config_data["ground_truth"] = [
-                        {
-                            "question":        str(r.get("question", r.get("q", ""))),
-                            "expected_answer": str(r.get("expected_answer", r.get("answer", r.get("a", "")))),
-                            "context":         str(r.get("context", "")),
-                        }
-                        for r in parsed if r
-                    ]
+                    rows = parsed
+                elif isinstance(parsed, dict):
+                    # Search known wrapper keys first, then any value that is a list
+                    for wrapper_key in (
+                        "test_cases", "cases", "questions", "data",
+                        "items", "entries", "records", "samples",
+                        "ground_truth", "qa_pairs", "pairs",
+                    ):
+                        if wrapper_key in parsed and isinstance(parsed[wrapper_key], list):
+                            rows = parsed[wrapper_key]
+                            break
+                    if rows is None:
+                        # Last resort: use the first list value found in the object
+                        for v in parsed.values():
+                            if isinstance(v, list) and v:
+                                rows = v
+                                break
+
+                if rows:
+                    pairs = []
+                    for r in rows:
+                        if not isinstance(r, dict):
+                            continue
+                        # Question — accept multiple field names
+                        q = (
+                            r.get("question") or r.get("query") or
+                            r.get("q") or r.get("input") or
+                            r.get("user_input") or r.get("prompt") or ""
+                        )
+                        # Expected answer — accept multiple field names
+                        a = (
+                            r.get("expected_answer") or r.get("answer") or
+                            r.get("a") or r.get("reference") or
+                            r.get("expected_output") or r.get("ground_truth") or ""
+                        )
+                        # Context — accept multiple field names; preserve list as-is
+                        c = (
+                            r.get("context") or r.get("expected_chunk") or
+                            r.get("chunk") or r.get("contexts") or
+                            r.get("retrieved_context") or r.get("source") or
+                            r.get("passages") or ""
+                        )
+                        if q and a:
+                            pairs.append({
+                                "question":        str(q).strip(),
+                                "expected_answer": str(a).strip(),
+                                # Preserve list context as-is so _ground_truth_to_prompts
+                                # can keep individual chunks separate.
+                                "context": c,
+                            })
+                    config_data["ground_truth"] = pairs
+                    print(f"[API] Parsed {len(pairs)} ground truth pairs from JSON ({filename})")
+                else:
+                    print(f"[API] Could not locate a list of Q&A pairs in JSON file: {filename}")
+
             else:
-                # CSV: header row with question, expected_answer, context columns
+                # CSV: flexible header — map common column name variants
                 reader = csv.DictReader(io.StringIO(raw))
                 pairs = []
                 for row in reader:
-                    q = row.get("question") or row.get("q") or ""
-                    a = row.get("expected_answer") or row.get("answer") or row.get("a") or ""
-                    c = row.get("context") or ""
+                    q = (
+                        row.get("question") or row.get("query") or
+                        row.get("q") or row.get("input") or
+                        row.get("user_input") or ""
+                    )
+                    a = (
+                        row.get("expected_answer") or row.get("answer") or
+                        row.get("a") or row.get("reference") or
+                        row.get("ground_truth") or ""
+                    )
+                    c = (
+                        row.get("context") or row.get("expected_chunk") or
+                        row.get("chunk") or row.get("contexts") or
+                        row.get("source") or ""
+                    )
                     if q and a:
-                        pairs.append({"question": q.strip(), "expected_answer": a.strip(), "context": c.strip()})
+                        pairs.append({
+                            "question":        q.strip(),
+                            "expected_answer": a.strip(),
+                            "context":         c.strip(),
+                        })
                 config_data["ground_truth"] = pairs
+                print(f"[API] Parsed {len(pairs)} ground truth pairs from CSV ({filename})")
+
         except Exception as e:
             print(f"[API] Could not parse ground truth file: {e}")
 

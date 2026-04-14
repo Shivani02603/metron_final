@@ -33,7 +33,7 @@ def aggregate(
     # ── Per-class summaries ────────────────────────────────────────────────
     test_classes: Dict[str, ClassSummary] = {}
 
-    for test_class in ("functional", "security", "quality"):
+    for test_class in ("functional", "security", "quality", "rag"):
         class_results = [r for r in metric_results if r.superset == test_class]
         if class_results:
             test_classes[test_class] = _summarize(class_results)

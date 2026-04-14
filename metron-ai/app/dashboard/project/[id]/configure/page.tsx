@@ -187,7 +187,28 @@ export default function ConfigurePage() {
     setErrors({});
     setIsNavigating(true);
 
-    // Build full config and store
+    // Step 1: Read the ground truth file to completion BEFORE building the config.
+    // FileReader is callback-based; wrapping it in a Promise lets us await it so
+    // that both sessionStorage and rag_text are populated with real data rather
+    // than whatever was left over from a previous run.
+    let groundTruthText = "";
+    if (isRag && groundTruthFile) {
+      groundTruthText = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror  = () => resolve("");
+        reader.readAsText(groundTruthFile);
+      });
+      sessionStorage.setItem(`ground_truth_${projectId}`, groundTruthText);
+      sessionStorage.setItem(`ground_truth_name_${projectId}`, groundTruthFile.name);
+    } else {
+      sessionStorage.removeItem(`ground_truth_${projectId}`);
+      sessionStorage.removeItem(`ground_truth_name_${projectId}`);
+    }
+
+    // Step 2: Build full config — rag_text is now correct because groundTruthText
+    // was already loaded above.  Only the first 800 chars are sent as a context
+    // hint for persona generation; the full file is uploaded separately at run-time.
     const fullConfig = {
       endpoint_url: endpointUrl,
       request_field: requestField,
@@ -198,7 +219,7 @@ export default function ConfigurePage() {
       agent_domain: agentDomain,
       agent_description: agentDescription,
       is_rag: isRag,
-      rag_text: "",
+      rag_text: isRag ? groundTruthText.slice(0, 800) : "",
       num_personas: numPersonas,
       num_scenarios: numScenarios,
       conversation_turns: convTurns,
@@ -218,20 +239,7 @@ export default function ConfigurePage() {
 
     sessionStorage.setItem(`fullconfig_${projectId}`, JSON.stringify(fullConfig));
 
-    // Store ground truth file content for the preview page to attach
-    if (isRag && groundTruthFile) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        sessionStorage.setItem(`ground_truth_${projectId}`, reader.result as string);
-        sessionStorage.setItem(`ground_truth_name_${projectId}`, groundTruthFile.name);
-      };
-      reader.readAsText(groundTruthFile);
-    } else {
-      sessionStorage.removeItem(`ground_truth_${projectId}`);
-      sessionStorage.removeItem(`ground_truth_name_${projectId}`);
-    }
-
-    // Generate personas/scenarios only if not already done
+    // Step 3: Generate personas/scenarios only if not already done
     if (personas.length === 0) {
       try {
         const res = await fetch(`${API}/api/preview`, {
@@ -622,7 +630,7 @@ export default function ConfigurePage() {
 
       {/* ── Quality Metrics ────────────────────────────────── */}
       <Section title="Quality Metrics" icon="grade">
-        <p className="text-xs text-[var(--color-on-surface-variant)] opacity-70 -mt-2">These metrics always run on every conversation.</p>
+        <p className="text-xs text-[var(--color-on-surface-variant)] opacity-70 -mt-2">These metrics run on all functional and quality conversations. Security conversations are excluded to avoid content-filter conflicts.</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-4">
           {[
             { label: "Hallucination",    note: "DeepEval" },
@@ -647,7 +655,7 @@ export default function ConfigurePage() {
         </div>
         {isRag && (
           <div className="space-y-2">
-            <p className="text-xs font-bold uppercase tracking-widest text-[var(--color-on-surface-variant)] opacity-60">RAG Mode — also runs</p>
+            <p className="text-xs font-bold uppercase tracking-widest text-[var(--color-on-surface-variant)] opacity-60">RAG Mode — runs when retrieved context is available</p>
             {[
               { label: "Faithfulness",      note: "RAGAS" },
               { label: "Context Recall",    note: "RAGAS" },

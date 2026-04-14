@@ -66,52 +66,62 @@ async def _ragas_full(
     ground_truth: str,
 ) -> dict[str, tuple[float, str]]:
     """
-    Run all available RAGAS metrics (supports 0.4.x and 0.1.x API).
-    - faithfulness + answer_relevancy: always (no ground_truth needed)
-    - context_recall + context_precision: only when ground_truth present
+    Run RAGAS metrics for one conversation.
+
+    Metric priority (mirrors rag.py strategy):
+      1. Non-LLM metrics first (no Azure required):
+           NonLLMContextPrecisionWithReference  — needs ground_truth
+           NonLLMContextRecall                  — needs ground_truth
+      2. LLM metric (Azure required, added when env vars are present):
+           Faithfulness
     Returns dict of metric_name → (score, method).
-    Raises on failure — caller handles.
+    Raises on complete failure — caller handles.
     """
-    import os
+    import os, math
     from ragas import evaluate as ragas_evaluate  # type: ignore
-    from ragas.metrics import faithfulness as r_faith  # type: ignore
-    from ragas.llms import LangchainLLMWrapper  # type: ignore
-    from langchain_openai import AzureChatOpenAI  # type: ignore
 
-    azure_llm = AzureChatOpenAI(
-        azure_deployment=os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o"),
-        api_version=os.environ.get("OPENAI_API_VERSION", "2024-02-15-preview"),
-        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-        api_key=os.environ["AZURE_OPENAI_API_KEY"],
-        temperature=0,
-        max_tokens=1024,
-    )
-    ragas_llm = LangchainLLMWrapper(azure_llm)
-
-    ctx = (context[:3] or [""])
+    ctx    = context[:3] or [""]
     has_gt = bool(ground_truth and ground_truth.strip())
+    metrics_to_run: list = []
 
-    # Configure metrics with Azure LLM
-    r_faith.llm = ragas_llm
-    metrics_to_run = [r_faith]
-
-    try:
-        from ragas.metrics import answer_relevancy as r_rel  # type: ignore
-        r_rel.llm = ragas_llm
-        metrics_to_run.append(r_rel)
-    except (ImportError, AttributeError):
-        pass
-
+    # ── 1. Non-LLM metrics (always attempted when ground truth is available) ──
     if has_gt:
         try:
-            from ragas.metrics import context_recall as r_recall, context_precision as r_prec  # type: ignore
-            r_recall.llm = ragas_llm
-            r_prec.llm   = ragas_llm
-            metrics_to_run += [r_recall, r_prec]
-        except (ImportError, AttributeError):
+            from ragas.metrics import NonLLMContextPrecisionWithReference  # type: ignore
+            metrics_to_run.append(NonLLMContextPrecisionWithReference())
+        except (ImportError, Exception):
             pass
 
-    # Build dataset — try RAGAS 0.4.x EvaluationDataset first
+        try:
+            from ragas.metrics import NonLLMContextRecall  # type: ignore
+            metrics_to_run.append(NonLLMContextRecall())
+        except (ImportError, Exception):
+            pass
+
+    # ── 2. LLM metric: faithfulness (only when Azure is configured) ───────────
+    azure_ready = bool(
+        os.environ.get("AZURE_OPENAI_ENDPOINT") and
+        os.environ.get("AZURE_OPENAI_API_KEY")
+    )
+    if azure_ready:
+        try:
+            from ragas.llms import LangchainLLMWrapper  # type: ignore
+            from stages.s4_evaluation.functional import _build_azure_langchain_llm
+            ragas_llm = LangchainLLMWrapper(_build_azure_langchain_llm())
+            try:
+                from ragas.metrics import faithfulness as r_faith  # type: ignore
+                r_faith.llm = ragas_llm
+                metrics_to_run.append(r_faith)
+            except AttributeError:
+                from ragas.metrics import Faithfulness  # type: ignore
+                metrics_to_run.append(Faithfulness(llm=ragas_llm))
+        except Exception as e:
+            print(f"[RAGAS/quality] Faithfulness setup failed: {e}")
+
+    if not metrics_to_run:
+        raise RuntimeError("No RAGAS metrics available (ground_truth required for non-LLM metrics)")
+
+    # Build dataset
     try:
         from ragas import EvaluationDataset, SingleTurnSample  # type: ignore
         sample = SingleTurnSample(
@@ -123,53 +133,44 @@ async def _ragas_full(
         ds = EvaluationDataset(samples=[sample])
     except (ImportError, AttributeError):
         from datasets import Dataset  # type: ignore
-        data: dict = {
-            "question": [query],
-            "answer":   [response],
-            "contexts": [ctx],
-        }
+        data: dict = {"question": [query], "answer": [response], "contexts": [ctx]}
         if has_gt:
             data["ground_truth"] = [ground_truth]
         ds = Dataset.from_dict(data)
 
     loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, lambda: ragas_evaluate(ds, metrics=metrics_to_run))
 
-    def _run():
-        return ragas_evaluate(ds, metrics=metrics_to_run)
-
-    result = await loop.run_in_executor(None, _run)
-
-    # Extract scores — handle both dict-like (0.1.x) and DataFrame (0.4.x) results
-    import math
+    # Column map covers both LLM-based and non-LLM column names
+    col_map = {
+        "faithfulness":                             "ragas_faithfulness",
+        "context_recall":                           "ragas_context_recall",
+        "context_precision":                        "ragas_context_precision",
+        "non_llm_context_precision_with_reference": "ragas_context_precision",
+        "non_llm_context_recall":                   "ragas_context_recall",
+    }
     out: dict[str, tuple[float, str]] = {}
+
     try:
-        df = result.to_pandas()
-        col_map = {
-            "faithfulness":      "ragas_faithfulness",
-            "answer_relevancy":  "ragas_answer_relevancy",
-            "context_recall":    "ragas_context_recall",
-            "context_precision": "ragas_context_precision",
-        }
+        df  = result.to_pandas()
         row = df.iloc[0]
         for col, metric_name in col_map.items():
-            if col in df.columns:
-                raw = row[col]
+            if col in df.columns and metric_name not in out:
+                raw   = row[col]
                 score = float(raw) if (raw == raw and not (isinstance(raw, float) and math.isnan(raw))) else 0.0
                 out[metric_name] = (round(score, 4), "ragas")
     except Exception:
-        # Fallback: access result as dict (ragas 0.1.x)
-        for col, metric_name in [
-            ("faithfulness",     "ragas_faithfulness"),
-            ("answer_relevancy", "ragas_answer_relevancy"),
-            ("context_recall",   "ragas_context_recall"),
-            ("context_precision","ragas_context_precision"),
-        ]:
+        # Fallback: dict-style access (ragas 0.1.x)
+        for col, metric_name in col_map.items():
+            if metric_name in out:
+                continue
             try:
                 val = result[col]
                 if val is not None and not (isinstance(val, float) and math.isnan(val)):
                     out[metric_name] = (round(float(val), 4), "ragas")
             except (KeyError, TypeError):
                 pass
+
     return out
 
 
@@ -236,7 +237,8 @@ async def evaluate_quality(
         local: List[MetricResult] = []
 
         # ── GEval (domain-specific criteria) ─────────────────────────────────
-        if criteria_list:
+        # Respect config.use_geval — the UI toggle that disables GEval entirely.
+        if criteria_list and getattr(config, "use_geval", True):
             try:
                 geval_result = await loop.run_in_executor(
                     None, _run_deepeval_geval,

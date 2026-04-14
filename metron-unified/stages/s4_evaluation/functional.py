@@ -27,11 +27,21 @@ from core.config import THRESHOLDS
 from core.deepeval_azure import make_deepeval_azure_model
 
 LLM_JUDGE_PROMPT = """
-Evaluate this AI response on the following criteria.
+You are an impartial QA judge evaluating a single conversation turn.
 
-QUESTION: {question}
-AI RESPONSE: {response}
-EXPECTED BEHAVIOR: {expected}
+Evaluate ONLY the current question and the response to that question.
+Do not infer extra requirements from earlier turns or the user's broader profile.
+
+QUESTION (current turn): {question}
+AI RESPONSE (to this turn): {response}
+EXPECTED BEHAVIOR FOR THIS TURN: {expected}
+
+Important rules:
+- Prioritize direct alignment to the current QUESTION.
+- If EXPECTED BEHAVIOR FOR THIS TURN is "N/A", ignore it and judge using QUESTION only.
+- If EXPECTED BEHAVIOR conflicts with the QUESTION, follow the QUESTION.
+- Do not penalize the response for missing topics not requested in QUESTION.
+- Scores must be numbers in [0.0, 1.0].
 
 Rate the response from 0.0 to 1.0 on each criterion below:
 {criteria_text}
@@ -46,9 +56,9 @@ Return JSON where each key is the criterion name (lowercase, underscores) and va
 """
 
 _DEFAULT_CRITERIA_TEXT = (
-    "- relevance: Does it directly address the question?\n"
-    "- accuracy: Is the information correct?\n"
-    "- helpfulness: Does it help the user achieve their goal?"
+    "- relevance: Does it directly address the specific question asked in this turn?\n"
+    "- accuracy: Is the information correct and non-contradictory?\n"
+    "- completeness: Does it cover the key parts of the question without major omissions?"
 )
 
 
@@ -76,55 +86,6 @@ def _set_azure_env(config: RunConfig) -> None:
     if "azure" in provider and config.llm_api_key:
         os.environ.setdefault("AZURE_OPENAI_API_KEY", config.llm_api_key)
     os.environ.setdefault("OPENAI_API_VERSION", os.environ.get("AZURE_API_VERSION", "2025-01-01-preview"))
-
-
-def _build_azure_langchain_llm():
-    """
-    Build an AzureChatOpenAI client for RAGAS / LangChain, correctly handling
-    both endpoint formats that may be present in AZURE_OPENAI_ENDPOINT:
-
-      Full URL  (what the .env currently stores):
-        https://resource.cognitiveservices.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2025-01-01-preview
-
-      Base URL  (what AzureChatOpenAI actually expects):
-        https://resource.cognitiveservices.azure.com/
-
-    This function always normalises to the base URL, extracts the deployment
-    and api-version from the URL when the explicit env vars are absent, so
-    callers never need to care which format is in the environment.
-    """
-    import os, re
-    from langchain_openai import AzureChatOpenAI  # type: ignore
-
-    raw = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
-
-    # Strip to scheme + host so AzureChatOpenAI can append its own path.
-    base_match = re.match(r"(https?://[^/]+)", raw)
-    base_endpoint = (base_match.group(1) + "/") if base_match else raw
-
-    # Pull deployment from the URL path when AZURE_OPENAI_DEPLOYMENT_NAME is absent.
-    dep_match = re.search(r"/deployments/([^/?]+)", raw)
-    deployment = (
-        os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME")
-        or (dep_match.group(1) if dep_match else "gpt-4o")
-    )
-
-    # Pull api-version from the query string when the env var is absent.
-    ver_match = re.search(r"api-version=([^&\s]+)", raw)
-    api_version = (
-        os.environ.get("OPENAI_API_VERSION")
-        or os.environ.get("AZURE_API_VERSION")
-        or (ver_match.group(1) if ver_match else "2025-01-01-preview")
-    )
-
-    return AzureChatOpenAI(
-        azure_deployment=deployment,
-        api_version=api_version,
-        azure_endpoint=base_endpoint,
-        api_key=os.environ.get("AZURE_OPENAI_API_KEY", ""),
-        temperature=0,
-        max_tokens=1024,
-    )
 
 
 # ── DeepEval metric helpers (no fallback — let exceptions propagate) ──────────
@@ -201,8 +162,8 @@ async def _llm_judge(
     """LLM-as-judge using domain-specific or default criteria."""
     prompt = LLM_JUDGE_PROMPT.format(
         question=question[:400],
-        response=response[:1200],
-        expected=expected[:300] if expected else "A helpful, accurate response",
+        response=response[:600],
+        expected=expected[:300] if expected and expected.strip() else "N/A",
         criteria_text=criteria_text,
     )
     try:
@@ -215,10 +176,17 @@ async def _llm_judge(
                 result[k] = str(v)
             else:
                 try:
-                    result[k] = float(v)
+                    score = float(v)
+                    result[k] = max(0.0, min(1.0, score))
                 except (TypeError, ValueError):
                     pass
-        result.setdefault("overall", 0.5)
+        if "overall" not in result:
+            crit_scores = [
+                value
+                for key, value in result.items()
+                if key != "reasoning" and isinstance(value, float)
+            ]
+            result["overall"] = round(sum(crit_scores) / len(crit_scores), 4) if crit_scores else 0.5
         result.setdefault("reasoning", "")
         return result
     except Exception:
@@ -261,14 +229,16 @@ async def evaluate_functional(
         persona  = persona_map.get(conv.persona_id)
         if not conv.turns:
             return []
-        last_turn = conv.turns[-1]
-        query    = last_turn.query
-        response = last_turn.response
-        context  = last_turn.retrieved_context or []
+        # Functional tests are generated as initial prompts, so evaluate turn 1 consistently.
+        # This avoids scoring drift from later follow-up turns that may change topic.
+        eval_turn = conv.turns[0]
+        query    = eval_turn.query
+        response = eval_turn.response
+        context  = eval_turn.retrieved_context or []
         latency  = conv.total_latency_ms
         fishbone = persona.fishbone_dimensions if persona else {}
         intent   = persona.intent.value if persona else "genuine"
-        expected = last_turn.expected_behavior or ""
+        expected = eval_turn.expected_behavior or ""
 
         base_meta = dict(
             conversation_id=conv.conversation_id,
@@ -277,14 +247,14 @@ async def evaluate_functional(
             intent=intent,
             fishbone=fishbone,
             prompt=query,
-            response=response[:2000],
+            response=response[:500],
             latency_ms=latency,
             superset="functional",
         )
         local: List[MetricResult] = []
 
         # Error responses — record and skip metric scoring
-        if last_turn.is_error_response:
+        if eval_turn.is_error_response:
             local.append(MetricResult(
                 **base_meta, metric_name="error_response",
                 score=0.0, passed=False,

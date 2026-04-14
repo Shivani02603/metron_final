@@ -152,7 +152,7 @@ async def _llm_judge(
     """LLM-as-judge using domain-specific or default criteria."""
     prompt = LLM_JUDGE_PROMPT.format(
         question=question[:400],
-        response=response[:600],
+        response=response[:1200],
         expected=expected[:300] if expected else "A helpful, accurate response",
         criteria_text=criteria_text,
     )
@@ -228,7 +228,7 @@ async def evaluate_functional(
             intent=intent,
             fishbone=fishbone,
             prompt=query,
-            response=response[:500],
+            response=response[:2000],
             latency_ms=latency,
             superset="functional",
         )

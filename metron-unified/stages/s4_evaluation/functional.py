@@ -231,6 +231,39 @@ def _deepeval_usefulness(query: str, response: str, model) -> tuple[float, str]:
     return score, f"DeepEval GEval usefulness: {score:.3f}"
 
 
+def _deepeval_geval_factual_accuracy(
+    query: str, response: str, domain: str, model,
+) -> tuple[float, str]:
+    """
+    Fix 1: GEval-based factual accuracy fallback.
+    Used when HallucinationMetric cannot run because no reference context is available
+    or expected_behavior is too short (<200 chars) to serve as a reference document.
+    Leverages the LLM judge's domain knowledge to detect factual errors without needing
+    a ground-truth document. A fitness chatbot recommending dangerous loads, or a medical
+    chatbot citing wrong dosages, will score low here.
+    Raises on any error — caller records a skipped MetricResult.
+    """
+    from deepeval.metrics import GEval
+    from deepeval.test_case import LLMTestCase, LLMTestCaseParams
+
+    metric = GEval(
+        name="Factual Accuracy",
+        criteria=(
+            f"The response contains information that is factually sound and appropriate "
+            f"for a {domain} AI assistant. It does not make false claims, contradict "
+            f"established facts in the {domain} domain, or assert capabilities outside "
+            f"the agent's defined scope."
+        ),
+        evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
+        threshold=0.5,
+        model=model,
+    )
+    test_case = LLMTestCase(input=query, actual_output=response)
+    metric.measure(test_case)
+    score = round(float(metric.score), 4)
+    return score, f"GEval factual accuracy: {score:.3f} (domain: {domain})"
+
+
 # ── LLM Judge helpers ─────────────────────────────────────────────────────────
 
 async def _llm_judge(
@@ -298,10 +331,13 @@ async def _llm_completeness(
 async def _cross_turn_consistency(
     conv: Conversation,
     llm_client: LLMClient,
-) -> Optional[float]:
+) -> Optional[tuple[float, str, str]]:
     """
-    Check cross-turn consistency for multi-turn conversations.
-    Returns score (1.0 = consistent, 0.0 = contradicts itself) or None if skipped.
+    Fix 6: Check cross-turn consistency for multi-turn conversations.
+    Returns (score, reasoning, turns_text) or None if skipped.
+    - score: 1.0 = fully consistent, 0.0 = direct contradiction
+    - reasoning: judge's explanation (stored in MetricResult.response for verifiability)
+    - turns_text: serialized transcript (stored in MetricResult.prompt for verifiability)
     Only meaningful for 2+ turns.
     """
     if len(conv.turns) < 2:
@@ -318,8 +354,10 @@ async def _cross_turn_consistency(
         data = await llm_client.complete_json(
             prompt, temperature=0.1, max_tokens=200, task="judge", retries=2,
         )
-        return float(data.get("consistency", 1.0))
-    except Exception:
+        score     = float(data.get("consistency", 1.0))
+        reasoning = str(data.get("reasoning", "") or "No reasoning returned by judge")
+        return score, reasoning, turns_text
+    except Exception as e:
         return None
 
 
@@ -350,6 +388,9 @@ async def evaluate_functional(
     # Fix 3: always default criteria only (no domain criteria from quality_criteria)
     criteria_text  = _DEFAULT_CRITERIA_TEXT
     pass_threshold = THRESHOLDS["functional_pass"]
+
+    # Fix 1: domain used by GEval factual accuracy fallback
+    domain = getattr(config, "agent_domain", "general") or "general"
 
     # Fix 18: which DeepEval metrics to run (driven by config)
     active_deval = set(getattr(config, "deepeval_metrics", ["hallucination", "answer_relevancy"]) or [])
@@ -402,36 +443,76 @@ async def evaluate_functional(
                 ))
                 continue
 
-            # ── Hallucination (Fix 1 + Fix 36) ───────────────────────────────
-            # Priority: retrieved_context → expected_behavior → skip (no [query] fallback)
+            # ── Hallucination / Factual Accuracy (Fix 1 + Fix 36) ────────────
+            # Branch 1: RAG — use retrieved_context as reference (unchanged)
+            # Branch 2: Non-RAG with substantial expected_behavior (>=200 chars) — use as ref
+            # Branch 3: No substantial reference — GEval factual accuracy fallback
+            #   (uses LLM judge's domain knowledge; no reference document needed)
             if "hallucination" in active_deval and deval_model:
-                hall_ctx: Optional[list] = None
-                hall_ref_type = ""
                 if context:
-                    hall_ctx = context
-                    hall_ref_type = "retrieved_context"
-                elif expected:
-                    hall_ctx = [expected]
-                    hall_ref_type = "expected_behavior"
-                # else: hall_ctx stays None → skip the metric entirely
-
-                if hall_ctx is not None:
+                    # Branch 1: RAG — retrieved context chunks as reference
                     try:
                         hall_score, hall_reason = await loop.run_in_executor(
-                            None, _deepeval_hallucination, query, response, hall_ctx, deval_model,
+                            None, _deepeval_hallucination, query, response, context, deval_model,
                         )
                         local.append(MetricResult(
                             **base_meta, metric_name="hallucination",
                             score=hall_score,
                             passed=hall_score >= (1.0 - THRESHOLDS["hallucination_max"]),
-                            reason=f"{hall_reason} (ref: {hall_ref_type})",
+                            reason=f"{hall_reason} (ref: retrieved_context)",
                         ))
                     except Exception as e:
                         local.append(MetricResult(
                             **base_meta, metric_name="hallucination",
-                            score=0.0, passed=False, reason="",
+                            score=0.0, passed=False,
+                            reason=f"DeepEval error: {str(e)[:120]}",
                             skipped=True,
                             skip_reason=f"DeepEval error: {str(e)[:120]}",
+                        ))
+
+                elif expected and len(expected) >= 200:
+                    # Branch 2: substantial expected_behavior → valid reference document
+                    try:
+                        hall_score, hall_reason = await loop.run_in_executor(
+                            None, _deepeval_hallucination, query, response, [expected], deval_model,
+                        )
+                        local.append(MetricResult(
+                            **base_meta, metric_name="hallucination",
+                            score=hall_score,
+                            passed=hall_score >= (1.0 - THRESHOLDS["hallucination_max"]),
+                            reason=f"{hall_reason} (ref: expected_behavior)",
+                        ))
+                    except Exception as e:
+                        local.append(MetricResult(
+                            **base_meta, metric_name="hallucination",
+                            score=0.0, passed=False,
+                            reason=f"DeepEval error: {str(e)[:120]}",
+                            skipped=True,
+                            skip_reason=f"DeepEval error: {str(e)[:120]}",
+                        ))
+
+                else:
+                    # Branch 3: no usable reference → GEval factual accuracy fallback
+                    # Detects domain-level factual errors using LLM judge's training knowledge.
+                    # Short expected_behavior (<200 chars) is a behavioral description, not a
+                    # knowledge document — using it as a hallucination reference produces false 0.0s.
+                    try:
+                        fact_score, fact_reason = await loop.run_in_executor(
+                            None, _deepeval_geval_factual_accuracy, query, response, domain, deval_model,
+                        )
+                        local.append(MetricResult(
+                            **base_meta, metric_name="geval_factual_accuracy",
+                            score=fact_score,
+                            passed=fact_score >= pass_threshold,
+                            reason=fact_reason,
+                        ))
+                    except Exception as e:
+                        local.append(MetricResult(
+                            **base_meta, metric_name="geval_factual_accuracy",
+                            score=0.0, passed=False,
+                            reason=f"GEval error: {str(e)[:120]}",
+                            skipped=True,
+                            skip_reason=f"GEval error: {str(e)[:120]}",
                         ))
 
             # ── Answer Relevancy (Fix 18 + Fix 36) ───────────────────────────
@@ -557,28 +638,28 @@ async def evaluate_functional(
                     reason=comp_reason,
                 ))
 
-        # ── Cross-turn consistency (Fix 10) ───────────────────────────────────
+        # ── Cross-turn consistency (Fix 10 + Fix 6) ──────────────────────────
+        # Fix 6: stores full transcript in prompt, judge reasoning in response
+        # so every row is verifiable (no more "[multi-turn: N turns]" placeholder).
         if run_judge and len(conv.turns) >= 2:
-            base_conv = dict(
-                conversation_id=conv.conversation_id,
-                persona_id=conv.persona_id,
-                persona_name=conv.persona_name,
-                intent=intent,
-                fishbone=fishbone,
-                prompt=f"[multi-turn: {len(conv.turns)} turns]",
-                response="",
-                latency_ms=conv.total_latency_ms,
-                superset="functional",
-            )
             async with sem:
-                consistency = await _cross_turn_consistency(conv, llm_client)
-            if consistency is not None:
+                ct_result = await _cross_turn_consistency(conv, llm_client)
+            if ct_result is not None:
+                consistency, ct_reasoning, turns_text = ct_result
                 local.append(MetricResult(
-                    **base_conv,
+                    conversation_id=conv.conversation_id,
+                    persona_id=conv.persona_id,
+                    persona_name=conv.persona_name,
+                    intent=intent,
+                    fishbone=fishbone,
+                    prompt=turns_text[:1000],       # full serialized transcript
+                    response=ct_reasoning,           # judge's explanation
+                    latency_ms=conv.total_latency_ms,
+                    superset="functional",
                     metric_name="cross_turn_consistency",
                     score=round(consistency, 4),
                     passed=consistency >= pass_threshold,
-                    reason=f"Cross-turn consistency: {consistency:.3f}",
+                    reason=f"Cross-turn consistency: {consistency:.3f} — {ct_reasoning}",
                 ))
 
         return local

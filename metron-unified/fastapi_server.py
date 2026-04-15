@@ -20,6 +20,7 @@ from core.models import (
     ParseDocumentRequest, PreviewRequest, RunConfig,
 )
 from core.adapters.chatbot import ChatbotAdapter
+from core import db as _db
 from pipeline import run_pipeline
 from stages.s0_profile.document_parser import parse_document
 from stages.s1_personas.fishbone_builder import build_slots
@@ -35,8 +36,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory job store
+# In-memory job store — keyed by run_id
+# Fix 22: stores only status/progress/results (NO llm_api_key or auth_token)
 jobs: Dict[str, Dict[str, Any]] = {}
+
+
+@app.on_event("startup")
+async def _startup():
+    """Fix 21+28: init DB and re-populate in-memory jobs from recent completed runs."""
+    try:
+        _db.init_db()
+        for row in _db.load_recent_jobs(hours=24):
+            run_id = row["run_id"]
+            jobs[run_id] = {
+                "status":        row["status"],
+                "progress":      100,
+                "message":       "Completed (recovered from DB)",
+                "current_phase": "",
+                "phase_results": {},
+                "log_events":    [],
+                "error":         None,
+                "results":       row.get("results"),
+            }
+        print(f"[DB] Recovered {len(jobs)} recent runs from SQLite on startup.")
+    except Exception as e:
+        print(f"[DB] Startup recovery failed (non-fatal): {e}")
 
 # ──────────────────────────────────────────────────────────────────────────
 # GET /api/providers — list LLM providers
@@ -261,21 +285,24 @@ async def run_tests(
                 if isinstance(parsed, list):
                     rows = parsed
                 elif isinstance(parsed, dict):
-                    # Search known wrapper keys first, then any value that is a list
-                    for wrapper_key in (
-                        "test_cases", "cases", "questions", "data",
-                        "items", "entries", "records", "samples",
-                        "ground_truth", "qa_pairs", "pairs",
-                    ):
-                        if wrapper_key in parsed and isinstance(parsed[wrapper_key], list):
-                            rows = parsed[wrapper_key]
-                            break
-                    if rows is None:
-                        # Last resort: use the first list value found in the object
-                        for v in parsed.values():
-                            if isinstance(v, list) and v:
-                                rows = v
-                                break
+                    # Recursive search for a list of Q&A pairs
+                    def find_list(obj):
+                        if isinstance(obj, list):
+                            return obj
+                        if isinstance(obj, dict):
+                            for wrapper_key in (
+                                "test_cases", "cases", "questions", "data",
+                                "items", "entries", "records", "samples",
+                                "ground_truth", "qa_pairs", "pairs",
+                            ):
+                                if wrapper_key in obj and isinstance(obj[wrapper_key], list):
+                                    return obj[wrapper_key]
+                            for v in obj.values():
+                                found = find_list(v)
+                                if found:
+                                    return found
+                        return None
+                    rows = find_list(parsed)
 
                 if rows:
                     pairs = []
@@ -361,15 +388,27 @@ async def run_tests(
             doc_text = ""
 
     run_id = str(uuid.uuid4())
+
+    # Fix 29: project_id comes from config (set by UI from dashboard [id]) or defaults to run_id
+    project_id = run_config.project_id or run_id
+
+    # Fix 22: job store contains NO API keys — only status/progress/config summary
     jobs[run_id] = {
-        "status":       "queued",
-        "progress":     0,
-        "message":      "Queued",
+        "status":        "queued",
+        "progress":      0,
+        "message":       "Queued",
         "current_phase": "",
         "phase_results": {},
-        "log_events":   [],
-        "error":        None,
-        "results":      None,
+        "log_events":    [],
+        "error":         None,
+        "results":       None,
+        # Safe config summary (no credentials)
+        "config_summary": {
+            "endpoint_url":    run_config.endpoint_url,
+            "agent_domain":    run_config.agent_domain,
+            "llm_provider":    run_config.llm_provider,
+            "application_type": run_config.application_type.value,
+        },
     }
 
     background_tasks.add_task(
@@ -378,10 +417,10 @@ async def run_tests(
         config=run_config,
         job_store=jobs,
         doc_text=doc_text,
-        project_id=run_id,
+        project_id=project_id,
     )
 
-    return {"run_id": run_id}
+    return {"run_id": run_id, "project_id": project_id}
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -391,6 +430,19 @@ async def run_tests(
 async def get_job_status(run_id: str):
     job = jobs.get(run_id)
     if not job:
+        # Fix 21: fall back to DB for runs that completed before last restart
+        db_row = _db.get_run(run_id)
+        if db_row:
+            return {
+                "run_id":        run_id,
+                "status":        db_row.get("status", "completed"),
+                "progress":      100,
+                "message":       "Completed (from DB)",
+                "current_phase": "",
+                "phase_results": {},
+                "log_events":    [],
+                "error":         None,
+            }
         raise HTTPException(404, "Job not found")
     return {
         "run_id":        run_id,
@@ -411,6 +463,10 @@ async def get_job_status(run_id: str):
 async def get_job_results(run_id: str):
     job = jobs.get(run_id)
     if not job:
+        # Fix 21: fall back to DB
+        db_row = _db.get_run(run_id)
+        if db_row and db_row.get("results"):
+            return db_row["results"]
         raise HTTPException(404, "Job not found")
     if job["status"] == "running" or job["status"] == "queued":
         raise HTTPException(202, "Job still running")
@@ -425,6 +481,45 @@ async def get_job_results(run_id: str):
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "version": "2.0.0"}
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# GET /api/job/{run_id}/status — also checks DB if not in memory (Fix 21)
+# (Replaces the original endpoint above with DB fallback)
+# ──────────────────────────────────────────────────────────────────────────
+
+# NOTE: The original GET /api/job/{run_id}/status endpoint stays at line 393+
+# as-is. We add DB fallback there via an override at import time.
+# Actually we patch it here:
+
+# ──────────────────────────────────────────────────────────────────────────
+# GET /api/project/{project_id}/runs — Fix 28: run history for a project
+# ──────────────────────────────────────────────────────────────────────────
+@app.get("/api/project/{project_id}/runs")
+async def get_project_runs(project_id: str):
+    """Return all completed runs for a project, sorted newest-first."""
+    try:
+        runs = _db.get_runs_for_project(project_id)
+        return {"project_id": project_id, "runs": runs}
+    except Exception as e:
+        raise HTTPException(500, f"DB error: {e}")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# GET /api/runs/{run_id_a}/compare/{run_id_b} — Fix 28: regression diff
+# ──────────────────────────────────────────────────────────────────────────
+@app.get("/api/runs/{run_id_a}/compare/{run_id_b}")
+async def compare_runs(run_id_a: str, run_id_b: str):
+    """Compare health scores and class pass-rates between two runs."""
+    try:
+        diff = _db.compare_runs(run_id_a, run_id_b)
+        if "error" in diff:
+            raise HTTPException(404, diff["error"])
+        return diff
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Compare error: {e}")
 
 
 # ── Helper ─────────────────────────────────────────────────────────────────

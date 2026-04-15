@@ -67,20 +67,27 @@ export default function NodeBuilder() {
       formData.append("document", file);
 
       const testClasses = activeModules.map((m) => m.testClass);
-      const fieldConfig: Record<string, string> = {};
-      if (inputField) fieldConfig.input_field = inputField;
-      if (outputField) fieldConfig.output_field = outputField;
-
+      
       formData.append(
         "config",
         JSON.stringify({
-          api_endpoint: config.endpoint,
-          api_key: config.apiKey,
-          test_classes: testClasses,
-          do_load_test: testClasses.includes("load"),
-          load_test_users: loadUsers,
-          load_test_duration: loadDuration,
-          field_config: fieldConfig,
+          endpoint_url: config.endpoint,
+          request_field: inputField || "message",
+          response_field: outputField || "response",
+          auth_token: config.apiKey,
+          auth_type: config.apiKey ? "bearer" : "none",
+          agent_name: config.name || "Default Agent",
+          application_type: "chatbot",
+          is_rag: false,
+          llm_provider: "Groq", // default or fetch from project later
+          llm_api_key: "", // will be injected on backend via env if blank
+          num_personas: 3,
+          num_scenarios: 5,
+          conversation_turns: 3,
+          enable_judge: true,
+          performance_requests: testClasses.includes("performance") ? loadUsers : 0,
+          load_concurrent_users: loadUsers,
+          load_duration_seconds: loadDuration,
         })
       );
 

@@ -137,7 +137,7 @@ def generate_html_report(report: AggregatedReport) -> str:
   <div class="container">
     <div class="header">
       <h1>METRON Test Report</h1>
-      <p>{report.agent_name if hasattr(report, 'agent_name') else report.domain.capitalize()} · {report.application_type.value.replace('_',' ').title()} · {ts}</p>
+      <p>{report.agent_name or report.domain.capitalize()} · {report.application_type.value.replace('_',' ').title()} · {ts}</p>
     </div>
 
     <div class="card">

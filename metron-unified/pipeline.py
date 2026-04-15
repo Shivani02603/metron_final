@@ -133,6 +133,7 @@ async def run_pipeline(
             personas, profile, llm_client,
             rag_text=rag_text,
             ground_truth=config.ground_truth if config.is_rag else [],
+            max_prompts=config.num_scenarios or 0,   # Fix 35: wire UI num_scenarios cap
         )
 
         # 2b: Security prompts (adversarial personas only)
@@ -192,8 +193,8 @@ async def run_pipeline(
             _log(job_store, run_id, "conversation", {
                 "persona_name": conv.persona_name,
                 "test_class": phase,
-                "query": last_turn.query[:250] if last_turn else "",
-                "response": last_turn.response[:350] if last_turn else "",
+                "query": last_turn.query if last_turn else "",
+                "response": last_turn.response if last_turn else "",
                 "latency_ms": round(conv.total_latency_ms),
                 "num_turns": len(conv.turns),
                 "done": done,
@@ -314,6 +315,8 @@ async def run_pipeline(
             load_metrics=load_metrics,
             run_id=run_id,
             project_id=project_id,
+            # Fix 34: agent_name now lives on AggregatedReport (not added post-hoc)
+            agent_name=config.agent_name or (profile.domain.capitalize() + " Agent"),
         )
 
         # ── Stage 6: Feedback Loop ─────────────────────────────────────────
@@ -355,6 +358,7 @@ async def run_pipeline(
                 llm_client=llm_client,
                 run_stages_fn=_run_stages_on_new_slots,
                 progress_callback=fb_progress,
+                original_metric_results=all_metric_results,   # Fix 17
             )
             new_personas_added = len(personas) - original_persona_count
             effective = sum(1 for pb in report.persona_breakdown if hasattr(pb, "pass_rate") and pb.pass_rate < 50)
@@ -462,8 +466,7 @@ async def run_pipeline(
             if isinstance(pb, dict) and "pass_rate" in pb:
                 pb["pass_rate"] = round(pb["pass_rate"] * 100, 1)
 
-        # Add agent_name
-        final_json["agent_name"] = config.agent_name or (profile.domain.capitalize() + " Agent")
+        # Fix 34: agent_name is already on the report model — no post-hoc addition needed
 
         # Add legacy fields for UI backward compatibility
         final_json["personas"] = [
@@ -482,6 +485,20 @@ async def run_pipeline(
         job_store[run_id]["progress"] = 100
         job_store[run_id]["message"]  = f"Completed! Health score: {report.health_score:.0%}"
         job_store[run_id]["results"]  = final_json
+
+        # Fix 28: persist completed run to SQLite for history / regression endpoints
+        try:
+            from core import db as _db
+            _db.save_run(
+                run_id=run_id,
+                project_id=project_id,
+                health_score=report.health_score,
+                domain=config.agent_domain,
+                application_type=config.application_type.value,
+                results=final_json,
+            )
+        except Exception as db_err:
+            print(f"[Pipeline] DB save failed (non-fatal): {db_err}")
 
     except Exception as e:
         import traceback

@@ -1,12 +1,16 @@
 """
 Stage 4d: Performance evaluation.
 Built-in async HTTP timing — no external dependencies.
-Sourced from existing METRON performance test logic (app_v3.py run_performance_tests).
+
+Fix 6: throughput uses wall-clock time (time.monotonic), not sum(latencies).
+Fix 7: percentile uses linear interpolation so p95 != max for small samples.
+Fix 27: unique nonce appended to each prompt to prevent response caching.
 """
 
 from __future__ import annotations
 import asyncio
 import statistics
+import time
 from typing import Any, Dict, List, Optional
 
 from core.adapters.chatbot import ChatbotAdapter
@@ -21,6 +25,22 @@ PERFORMANCE_TEST_PROMPTS = [
 ]
 
 
+def _percentile(data: list, p: float) -> float:
+    """
+    Fix 7: Standard linear interpolation percentile.
+    With 20 samples, p95 correctly returns ~19th value, not the max.
+    """
+    if not data:
+        return 0.0
+    n = len(data)
+    if n == 1:
+        return data[0]
+    idx = (p / 100) * (n - 1)
+    lo  = int(idx)
+    hi  = min(lo + 1, n - 1)
+    return data[lo] + (idx - lo) * (data[hi] - data[lo])
+
+
 async def evaluate_performance(
     config: RunConfig,
     performance_prompts: Optional[List[str]] = None,
@@ -29,12 +49,20 @@ async def evaluate_performance(
     """
     Send N concurrent requests and measure latency distribution.
     Returns a metrics dict (not MetricResult list — performance is aggregate).
+
+    Fix 6: throughput = successful / wall_clock_seconds (not sum of latencies).
+    Fix 7: percentile uses linear interpolation (no more p95 == max).
+    Fix 27: each prompt gets a unique nonce to prevent endpoint response caching.
     """
     prompts = performance_prompts or PERFORMANCE_TEST_PROMPTS
     num_requests = min(config.performance_requests, len(prompts) * 4)
 
     # Cycle through prompts to reach num_requests
-    test_prompts = [prompts[i % len(prompts)] for i in range(num_requests)]
+    # Fix 27: add unique nonce per request to prevent caching
+    test_prompts = [
+        f"{prompts[i % len(prompts)]} [ref:{i}]"
+        for i in range(num_requests)
+    ]
 
     adapter = ChatbotAdapter(
         endpoint_url=config.endpoint_url,
@@ -45,10 +73,12 @@ async def evaluate_performance(
         timeout=30,
     )
 
-    # Batch into groups of 5 to avoid overwhelming the server
     BATCH = 5
     latencies: List[float] = []
     errors = 0
+
+    # Fix 6: record wall-clock start before any requests
+    wall_start = time.monotonic()
 
     for i in range(0, len(test_prompts), BATCH):
         batch = test_prompts[i:i + BATCH]
@@ -64,6 +94,9 @@ async def evaluate_performance(
                 latencies.append(resp.latency_ms)
         await asyncio.sleep(0.2)
 
+    # Fix 6: use actual elapsed wall-clock time for throughput
+    wall_elapsed_s = time.monotonic() - wall_start or 1.0
+
     total = len(test_prompts)
     successful = total - errors
 
@@ -77,14 +110,9 @@ async def evaluate_performance(
         }
 
     sorted_lat = sorted(latencies)
-    n = len(sorted_lat)
 
-    def percentile(data: list, p: float) -> float:
-        idx = int(len(data) * p / 100)
-        return data[min(idx, len(data) - 1)]
-
-    total_time_s = sum(latencies) / 1000.0 or 1.0
-    throughput = successful / total_time_s
+    # Fix 6: correct throughput formula
+    throughput = successful / wall_elapsed_s
 
     return {
         "total_requests":  total,
@@ -95,9 +123,9 @@ async def evaluate_performance(
         "min_latency_ms":  round(sorted_lat[0], 2),
         "max_latency_ms":  round(sorted_lat[-1], 2),
         "median_latency_ms": round(statistics.median(latencies), 2),
-        "p50_latency_ms":  round(percentile(sorted_lat, 50), 2),
-        "p95_latency_ms":  round(percentile(sorted_lat, 95), 2),
-        "p99_latency_ms":  round(percentile(sorted_lat, 99), 2),
+        "p50_latency_ms":  round(_percentile(sorted_lat, 50), 2),
+        "p95_latency_ms":  round(_percentile(sorted_lat, 95), 2),
+        "p99_latency_ms":  round(_percentile(sorted_lat, 99), 2),
         "throughput_rps":  round(throughput, 3),
-        "passed":          percentile(sorted_lat, 95) <= 5000 and errors / total < 0.05,
+        "passed":          _percentile(sorted_lat, 95) <= 5000 and errors / total < 0.05,
     }

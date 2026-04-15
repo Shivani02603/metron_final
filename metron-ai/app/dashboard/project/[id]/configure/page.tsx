@@ -210,6 +210,7 @@ export default function ConfigurePage() {
     // was already loaded above.  Only the first 800 chars are sent as a context
     // hint for persona generation; the full file is uploaded separately at run-time.
     const fullConfig = {
+      project_id: projectId,
       endpoint_url: endpointUrl,
       request_field: requestField,
       response_field: responseField,

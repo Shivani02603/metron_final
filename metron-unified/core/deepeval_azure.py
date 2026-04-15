@@ -83,17 +83,31 @@ def make_deepeval_azure_model():
             )
 
         def generate(self, prompt: str) -> str:
-            response = self.model.chat.completions.create(
-                model=self._deployment,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=2048,
-            )
-            return response.choices[0].message.content
+            import time
+            last_exc = None
+            for attempt in range(3):
+                try:
+                    response = self.model.chat.completions.create(
+                        model=self._deployment,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0,
+                        max_tokens=2048,
+                    )
+                    return response.choices[0].message.content
+                except Exception as e:
+                    last_exc = e
+                    msg = str(e)
+                    if "429" in msg or "rate_limit" in msg.lower() or "rate limit" in msg.lower():
+                        wait = 10 * (attempt + 1)
+                        print(f"[DeepEval/Azure] Rate limited — waiting {wait}s (attempt {attempt+1}/3)")
+                        time.sleep(wait)
+                    else:
+                        raise
+            raise RuntimeError(f"DeepEval Azure: max retries exceeded — {last_exc}")
 
         async def a_generate(self, prompt: str) -> str:
             import asyncio
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, self.generate, prompt)
 
         def get_model_name(self) -> str:

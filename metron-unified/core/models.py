@@ -83,6 +83,9 @@ class AppProfile(BaseModel):
 
 class RunConfig(BaseModel):
     """Full configuration submitted by user from the configure page."""
+    # Project identity (separate from run_id so multiple runs share a project)
+    project_id:      Optional[str] = None   # UI sends dashboard project [id]; pipeline generates one if absent
+
     # Endpoint
     endpoint_url:    str
     request_field:   str = "message"
@@ -230,11 +233,18 @@ class MetricResult(BaseModel):
     prompt:          str
     response:        str
     latency_ms:      float
-    superset:        str   # functional | security | quality | performance | load
+    superset:        str   # functional | security | safety_passive | quality | performance | load
     metric_name:     str
     score:           float  # 0.0-1.0
     passed:          bool
     reason:          str
+    # Skipped metric tracking (Issue 36)
+    # When an evaluation tool fails (rate limit, exception), record skipped=True
+    # instead of omitting the result. Aggregator excludes skipped from pass-rate denominator.
+    skipped:         bool = False
+    skip_reason:     Optional[str] = None
+    # Turn tracking for multi-turn evaluation
+    turn_number:     Optional[int] = None
     # Security extras
     vulnerability_found: Optional[bool] = None
     owasp_category:      Optional[str]  = None
@@ -246,13 +256,15 @@ class MetricResult(BaseModel):
 # ── Stage 5: Aggregated Report ─────────────────────────────────────────────
 
 class ClassSummary(BaseModel):
-    total:     int
-    passed:    int
-    failed:    int
-    pass_rate: float
-    avg_score: float
-    by_metric: Dict[str, Any] = {}
-    failures:  List[Dict[str, Any]] = []
+    total:        int
+    passed:       int
+    failed:       int
+    skipped:      int = 0          # metrics skipped due to API errors / tool failures
+    pass_rate:    float
+    avg_score:    float
+    by_metric:    Dict[str, Any] = {}
+    failures:     List[Dict[str, Any]] = []
+    evaluation_warnings: List[str] = []   # populated when >50% of a metric's evals were skipped
 
 class PersonaBreakdown(BaseModel):
     persona_id:   str
@@ -269,6 +281,7 @@ class PersonaBreakdown(BaseModel):
 class AggregatedReport(BaseModel):
     run_id:           str
     project_id:       str
+    agent_name:       str = ""    # human-readable name of the agent under test
     application_type: ApplicationType
     domain:           str
     timestamp:        datetime = Field(default_factory=datetime.utcnow)
@@ -281,7 +294,9 @@ class AggregatedReport(BaseModel):
     total_tests:      int
     total_passed:     int
     total_failed:     int
+    total_skipped:    int = 0     # total skipped metric evaluations across all classes
     feedback_applied: bool = False
+    evaluation_warnings: List[str] = []   # cross-class warnings surfaced to UI
     report_html:      str  = ""
 
 

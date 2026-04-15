@@ -9,6 +9,12 @@ Tool split:
                Faithfulness (LLM-based, Azure GPT-4o)
   DeepEval → answer_relevancy, contextual_relevancy (per-conv, Azure GPT-4o)
 
+Fix 18: only the RAGAS metrics listed in config.ragas_metrics are run.
+Fix 16: empty context uses "NO_CONTEXT_RETRIEVED" placeholder with an explicit
+        warning instead of the silent [""] fallback.
+Fix 20: asyncio.get_running_loop() replaces deprecated get_event_loop().
+Fix 36: DeepEval exceptions → skipped MetricResult instead of silent drop.
+
 Non-LLM metrics always run regardless of Azure configuration.
 LLM metrics are additive — failure does not suppress non-LLM results.
 """
@@ -67,7 +73,6 @@ def _build_ragas_dataset(
             samples.append(sample)
         return EvaluationDataset(samples=samples), "new"
     except (ImportError, AttributeError):
-        # Fallback: ragas 0.1.x HuggingFace Dataset API
         from datasets import Dataset  # type: ignore
         data = {
             "question":     questions,
@@ -85,13 +90,11 @@ def _extract_ragas_scores(result: Any, column_style: str) -> Optional[Any]:
     """
     try:
         df = result.to_pandas()
-        # Normalize column names: 0.4.x may use different names
         rename_map = {
-            # 0.4.x names → canonical names
-            "user_input":        "question",
-            "response":          "answer",
-            "retrieved_contexts":"contexts",
-            "reference":         "ground_truth",
+            "user_input":         "question",
+            "response":           "answer",
+            "retrieved_contexts": "contexts",
+            "reference":          "ground_truth",
         }
         df = df.rename(columns=rename_map)
         return df
@@ -105,15 +108,18 @@ def _run_ragas(
     answers: List[str],
     contexts: List[List[str]],
     ground_truths: List[str],
+    active_ragas_metrics: set,
 ) -> Tuple[Optional[Any], bool, str]:
     """
     Run RAGAS evaluate() synchronously.
 
+    Fix 18: active_ragas_metrics controls which metrics are attempted.
+
     Metric priority:
-      1. Non-LLM metrics (no Azure required, always attempted):
+      1. Non-LLM metrics (no Azure required, always attempted when in active set):
            NonLLMContextPrecisionWithReference  — requires ground_truth
            NonLLMContextRecall                  — requires ground_truth
-      2. LLM metric (Azure required, added only when env vars are present):
+      2. LLM metric (Azure required, added only when in active set and env set):
            Faithfulness
 
     Returns (result_df, has_ground_truth, status_msg).
@@ -124,8 +130,8 @@ def _run_ragas(
         has_ground_truth = any(gt.strip() for gt in ground_truths)
         active_metrics: List[Any] = []
 
-        # ── 1. Non-LLM metrics (zero API calls, always work if RAGAS installed) ──
-        if has_ground_truth:
+        # ── 1. Non-LLM metrics ────────────────────────────────────────────────
+        if has_ground_truth and "context_precision" in active_ragas_metrics:
             try:
                 from ragas.metrics import NonLLMContextPrecisionWithReference  # type: ignore
                 active_metrics.append(NonLLMContextPrecisionWithReference())
@@ -133,6 +139,7 @@ def _run_ragas(
             except (ImportError, Exception) as e:
                 print(f"[RAG/RAGAS] NonLLMContextPrecisionWithReference unavailable: {e}")
 
+        if has_ground_truth and "context_recall" in active_ragas_metrics:
             try:
                 from ragas.metrics import NonLLMContextRecall  # type: ignore
                 active_metrics.append(NonLLMContextRecall())
@@ -140,12 +147,12 @@ def _run_ragas(
             except (ImportError, Exception) as e:
                 print(f"[RAG/RAGAS] NonLLMContextRecall unavailable: {e}")
 
-        # ── 2. LLM metric: faithfulness (only when Azure env is fully set) ────────
+        # ── 2. LLM metric: faithfulness ───────────────────────────────────────
         azure_ready = bool(
             os.environ.get("AZURE_OPENAI_ENDPOINT") and
             os.environ.get("AZURE_OPENAI_API_KEY")
         )
-        if azure_ready:
+        if "faithfulness" in active_ragas_metrics and azure_ready:
             try:
                 ragas_llm = _build_azure_ragas_llm()
                 try:
@@ -158,8 +165,8 @@ def _run_ragas(
                 print("[RAG/RAGAS] Added Faithfulness (LLM-based, Azure)")
             except Exception as e:
                 print(f"[RAG/RAGAS] Faithfulness metric setup failed (non-LLM metrics still run): {e}")
-        else:
-            print("[RAG/RAGAS] Azure env not set — running non-LLM metrics only")
+        elif "faithfulness" in active_ragas_metrics:
+            print("[RAG/RAGAS] Azure env not set — skipping Faithfulness (non-LLM metrics still run)")
 
         if not active_metrics:
             return None, has_ground_truth, "No RAGAS metrics could be initialised (ground_truth required for non-LLM metrics)"
@@ -188,20 +195,21 @@ async def _run_deepeval_metrics(
     Run DeepEval RAG metrics per conversation:
       - AnswerRelevancyMetric
       - ContextualRelevancyMetric
+
+    Fix 36: exceptions produce skipped MetricResult instead of score=0.0.
     """
     from deepeval.metrics import AnswerRelevancyMetric, ContextualRelevancyMetric  # type: ignore
     from deepeval.test_case import LLMTestCase  # type: ignore
 
     base    = _base_meta(conv, persona, query, answer)
     results = []
-    loop    = asyncio.get_event_loop()
+    loop    = asyncio.get_running_loop()   # Fix 20
 
-    # Ensure context is a non-empty list (DeepEval requires at least one string)
     safe_context = context if context else ["(no context retrieved)"]
 
     for metric_cls, metric_name in [
-        (AnswerRelevancyMetric,    "rag_answer_relevancy"),
-        (ContextualRelevancyMetric,"rag_context_relevancy"),
+        (AnswerRelevancyMetric,     "rag_answer_relevancy"),
+        (ContextualRelevancyMetric, "rag_context_relevancy"),
     ]:
         try:
             tc_kwargs: Dict[str, Any] = {
@@ -224,12 +232,13 @@ async def _run_deepeval_metrics(
                 reason=metric.reason or "",
             ))
         except Exception as e:
+            # Fix 36: skipped result instead of silent failure
             results.append(MetricResult(
                 **base,
                 metric_name=metric_name,
-                score=0.0,
-                passed=False,
-                reason=f"Error: {str(e)[:120]}",
+                score=0.0, passed=False, reason="",
+                skipped=True,
+                skip_reason=f"DeepEval error: {str(e)[:120]}",
             ))
 
     return results
@@ -243,6 +252,9 @@ async def evaluate_rag(
 ) -> List[MetricResult]:
     """
     Run RAG evaluation using RAGAS (batch) + DeepEval (per-conv).
+
+    Fix 18: only metrics listed in config.ragas_metrics are run.
+    Fix 16: missing context logs a warning and uses "NO_CONTEXT_RETRIEVED" placeholder.
     Returns list of MetricResult objects.
     """
     from core.deepeval_azure import make_deepeval_azure_model  # type: ignore
@@ -250,9 +262,10 @@ async def evaluate_rag(
 
     _set_azure_env(config)
 
-    # Evaluate functional conversations that have retrieved_context OR an
-    # expected_answer (ground-truth based RAG where the endpoint may not return
-    # context itself — context comes from the ground_truth_context field instead).
+    # Fix 18: build active metric set from config (default to all if not specified)
+    _default_ragas = {"faithfulness", "answer_relevancy", "context_recall", "context_precision"}
+    active_ragas = set(getattr(config, "ragas_metrics", None) or _default_ragas)
+
     rag_convs = [
         c for c in conversations
         if c.test_class == TestClass.FUNCTIONAL
@@ -266,7 +279,6 @@ async def evaluate_rag(
 
     persona_map = {p.persona_id: p for p in personas}
 
-    # Build parallel lists for RAGAS batch evaluation
     questions:     List[str]       = []
     answers:       List[str]       = []
     contexts:      List[List[str]] = []
@@ -276,30 +288,33 @@ async def evaluate_rag(
         t = conv.turns[0]
         questions.append(t.query)
         answers.append(t.response)
-        # Prefer retrieved_context from the endpoint; fall back to [""] so RAGAS
-        # doesn't crash on an empty context list.
-        contexts.append(t.retrieved_context if t.retrieved_context else [""])
+
+        # Fix 16: warn when context is missing; use explicit placeholder
+        if t.retrieved_context:
+            contexts.append(t.retrieved_context)
+        else:
+            print(
+                f"[RAG Eval] Warning: no retrieved_context for conv {conv.conversation_id[:8]} "
+                f"(persona: {conv.persona_name}). RAGAS will use NO_CONTEXT_RETRIEVED placeholder — "
+                f"context precision/recall scores will reflect a context miss, not a real retrieval."
+            )
+            contexts.append(["NO_CONTEXT_RETRIEVED"])
+
         ground_truths.append(t.expected_answer or "")
 
     all_results: List[MetricResult] = []
 
     # ── RAGAS batch evaluation ─────────────────────────────────────────────────
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()   # Fix 20
     df, has_gt, ragas_status = await loop.run_in_executor(
-        None, _run_ragas, questions, answers, contexts, ground_truths
+        None, _run_ragas, questions, answers, contexts, ground_truths, active_ragas
     )
 
     if df is not None:
-        # Map both LLM-based and non-LLM metric column names → frontend names.
-        # NonLLM variants share the same frontend label as their LLM counterparts
-        # so the results page shows them under the same metric regardless of which
-        # RAGAS path produced them.
         ragas_metric_cols = {
-            # LLM-based
             "faithfulness":      "rag_faithfulness",
             "context_recall":    "rag_context_recall",
             "context_precision": "rag_context_precision",
-            # Non-LLM variants (RAGAS 0.2.x+)
             "non_llm_context_precision_with_reference": "rag_context_precision",
             "non_llm_context_recall":                   "rag_context_recall",
         }
@@ -310,19 +325,25 @@ async def evaluate_rag(
             if idx >= len(df):
                 continue
             row = df.iloc[idx]
+
+            # Flag context miss in reason
+            missing_ctx = contexts[idx] == ["NO_CONTEXT_RETRIEVED"]
+
             for col, metric_name in ragas_metric_cols.items():
                 if col not in df.columns:
                     continue
                 raw_score = row[col]
-                # Guard against NaN
                 import math
                 score = float(raw_score) if (raw_score == raw_score and not (isinstance(raw_score, float) and math.isnan(raw_score))) else 0.0
+                reason = f"RAGAS {col}: {score:.3f}"
+                if missing_ctx:
+                    reason += " (Warning: no context retrieved from endpoint)"
                 all_results.append(MetricResult(
                     **base,
                     metric_name=metric_name,
                     score=round(score, 4),
                     passed=score >= 0.5,
-                    reason=f"RAGAS {col}: {score:.3f}",
+                    reason=reason,
                 ))
     else:
         print(f"[RAG/RAGAS] Skipped — {ragas_status}")

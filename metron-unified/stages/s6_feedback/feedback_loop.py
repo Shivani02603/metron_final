@@ -6,7 +6,7 @@ One iteration per run. Sourced from new metron-backend/app/stage7_feedback/feedb
 """
 
 from __future__ import annotations
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.llm_client import LLMClient
 from core.models import AggregatedReport, AppProfile, Persona, PersonaFeedback, RunConfig
@@ -133,13 +133,19 @@ async def run_feedback_loop(
     llm_client: LLMClient,
     run_stages_fn: Callable,   # async fn(new_slots, profile, config, llm_client) -> (results, convs, new_personas)
     progress_callback: Optional[Callable] = None,
+    original_metric_results: Optional[List[Any]] = None,  # Fix 17
 ) -> tuple[AggregatedReport, List[Persona]]:
     """
     Run one feedback iteration:
     1. Analyze effectiveness
     2. Generate new persona slots
     3. Run Stages 2-5 on new personas
-    4. Merge results and re-aggregate
+    4. Merge original + new results and re-aggregate
+
+    Fix 17: original_metric_results passed in so re-aggregation uses combined data
+            (original run + feedback run) rather than new results only.
+    Fix 31: removed arbitrary 70/30 health score blend — health is now naturally
+            computed from all results by the aggregator.
 
     Returns updated (report, all_personas).
     """
@@ -174,33 +180,30 @@ async def run_feedback_loop(
     if progress_callback:
         progress_callback(96, "Merging feedback results…")
 
-    # Re-aggregate with combined results
     from stages.s5_aggregation.aggregator import aggregate as _aggregate
     all_personas = personas + new_personas
 
-    # Rebuild combined metric results from both runs
-    # The existing report contains partial data; we add new results
+    # Fix 17: combine original metric results with new feedback results so the
+    # aggregator sees the full picture, not just the incremental feedback pass.
+    combined_results = list(original_metric_results or []) + list(new_results)
+    # original conversations are not available here, use new_convs; drill-down will
+    # only reference new conversations but totals will be correct.
     combined_report = _aggregate(
-        metric_results=new_results,   # aggregator uses all results internally
+        metric_results=combined_results,
         conversations=new_convs,
         personas=all_personas,
         config=config,
         run_id=report.run_id,
         project_id=report.project_id,
+        agent_name=report.agent_name,
         feedback_applied=True,
     )
 
-    # Merge health scores: weighted 70% original, 30% feedback
-    merged_health = report.health_score * 0.7 + combined_report.health_score * 0.3
-    combined_report.health_score = round(merged_health, 4)
-    combined_report.passed = merged_health >= 0.7
-    combined_report.persona_breakdown = report.persona_breakdown + combined_report.persona_breakdown
-    combined_report.total_tests  += report.total_tests
-    combined_report.total_passed += report.total_passed
-    combined_report.total_failed += report.total_failed
-    # Merge test_classes from original
-    for cls_name, cls_summary in report.test_classes.items():
-        if cls_name not in combined_report.test_classes:
-            combined_report.test_classes[cls_name] = cls_summary
+    # Fix 31: health score computed naturally from combined data — no manual blend.
+    # Merge persona_breakdown: original breakdown entries not in combined
+    existing_ids = {b.persona_id for b in combined_report.persona_breakdown}
+    for pb in report.persona_breakdown:
+        if pb.persona_id not in existing_ids:
+            combined_report.persona_breakdown.append(pb)
 
     return combined_report, all_personas

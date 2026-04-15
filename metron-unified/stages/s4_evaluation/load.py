@@ -50,7 +50,8 @@ _LOCUST_FILE_TEMPLATE = textwrap.dedent("""\
 
 
     class AIEndpointUser(HttpUser):
-        wait_time = between(1.0, 3.0)
+        # Fix 26: tighter wait window gets more requests into the test window
+        wait_time = between(0.5, 1.5)
 
         def on_start(self):
             if _AUTH_TYPE == "bearer" and _AUTH_TOKEN:
@@ -230,8 +231,11 @@ async def evaluate_load(config: RunConfig) -> Dict[str, Any]:
 
         host = _build_locust_file(config, locust_file)
 
-        # Gradual spawn: ramp up 1/5th of users per second (spreads load, avoids thundering herd)
-        spawn_rate = max(1, num_users // 5)
+        # Fix 26: ramp-up completes within 20% of test duration (max) to preserve test time.
+        # Old formula: num_users // 5 → with 5 users gives spawn_rate=1, wastes 5s of a 30s test.
+        # New formula: ramp_time_budget = 20% of duration, spawn_rate = users / budget.
+        ramp_time_budget = max(5.0, duration_s * 0.2)
+        spawn_rate = max(1, int(num_users / ramp_time_budget))
 
         cmd = [
             sys.executable, "-m", "locust",
@@ -254,7 +258,7 @@ async def evaluate_load(config: RunConfig) -> Dict[str, Any]:
         # asyncio.create_subprocess_exec requires ProactorEventLoop on Windows but uvicorn
         # uses SelectorEventLoop — this causes silent failures. subprocess.run in an
         # executor works on all platforms without event-loop compatibility issues.
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _run_locust():
             return subprocess.run(

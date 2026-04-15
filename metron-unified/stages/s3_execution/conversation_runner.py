@@ -24,7 +24,7 @@ from core.models import (
 )
 
 
-MAX_TURNS = 3   # Turn 1 free (entry_point), Turns 2-3 via combined eval+generate
+_DEFAULT_MAX_TURNS = 3   # fallback when config.conversation_turns is absent
 
 COMBINED_TURN_PROMPT = """
 Do two things at once:
@@ -105,11 +105,14 @@ async def run_conversation(
         started_at=datetime.utcnow(),
     )
 
+    # Fix 9: use config.conversation_turns (cap at 8 to prevent runaway cost)
+    max_turns = min(getattr(config, "conversation_turns", _DEFAULT_MAX_TURNS) or _DEFAULT_MAX_TURNS, 8)
+
     current_state = ConversationState.SEEKING
     current_message = prompt.text   # Start with the generated prompt
     history_lines: List[str] = []
 
-    for turn_num in range(1, MAX_TURNS + 1):
+    for turn_num in range(1, max_turns + 1):
         # Send to adapter — retry once on 429 (target endpoint rate limit)
         resp: AdapterResponse = await adapter.send(current_message)
         if resp.error and "429" in str(resp.error):
@@ -158,7 +161,7 @@ async def run_conversation(
         conversation.total_latency_ms += latency_ms
 
         history_lines.append(f"User: {current_message}")
-        history_lines.append(f"AI: {turn.response[:300]}")
+        history_lines.append(f"AI: {turn.response[:500]}")
 
         # RAG: single question → single answer, no follow-up turns needed.
         is_rag = (config.application_type == ApplicationType.RAG)
@@ -168,7 +171,7 @@ async def run_conversation(
 
         # Stop early: last turn reached, or chatbot returned an error/bad field.
         # Security convs also stop on error (1 turn is enough) but don't mark goal_achieved=False.
-        if turn_num >= MAX_TURNS or is_error:
+        if turn_num >= max_turns or is_error:
             if is_error and not is_security:
                 conversation.goal_achieved = False
             break
@@ -224,13 +227,14 @@ async def _combined_eval_generate(
         abandon_trigger=persona.behavioral_params.abandon_trigger,
         base_style=persona.language_model.base_style or "conversational",
         frustrated_style=persona.language_model.frustrated_style or "more direct",
-        response=ai_response[:800],
+        response=ai_response[:1200],
         history=history,
     )
 
     try:
+        # Fix 24: use judge-tier model (70B / GPT-4o) — 8B (fast) makes poor persona decisions
         data = await llm_client.complete_json(
-            prompt, temperature=0.3, max_tokens=600, task="fast", retries=2,
+            prompt, temperature=0.3, max_tokens=600, task="judge", retries=2,
         )
         goal_progress = data.get("goal_progress", "none")
         goal_achieved = goal_progress == "achieved"
@@ -279,9 +283,15 @@ async def run_all_conversations(
         2
     ))
 
-    total = len(ordered)
+    functional_prompts = [p for p in ordered if p.test_class != TestClass.SECURITY]
+    security_prompts   = [p for p in ordered if p.test_class == TestClass.SECURITY]
+
+    total     = len(ordered)
     completed = 0
-    sem = asyncio.Semaphore(3)  # max 3 concurrent conversations — avoids overwhelming target endpoint
+    results: List[Conversation] = []
+
+    # ── Functional / Performance: concurrent (up to 3 in parallel) ────────────
+    sem = asyncio.Semaphore(3)
 
     async def _run_one(prompt):
         nonlocal completed
@@ -295,5 +305,23 @@ async def run_all_conversations(
             progress_callback(completed, total, conv)
         return conv
 
-    raw = await asyncio.gather(*[_run_one(p) for p in ordered])
-    return [c for c in raw if c is not None]
+    func_raw = await asyncio.gather(*[_run_one(p) for p in functional_prompts])
+    results.extend(c for c in func_raw if c is not None)
+
+    # ── Security probes: sequential with 1s delay (Fix 25) ────────────────────
+    # Prevents WAF/IP bans from rapid-fire adversarial traffic bursts.
+    probe_delay = getattr(config, "security_probe_delay_s", 1.0)
+    for i, prompt in enumerate(security_prompts):
+        persona = persona_map.get(prompt.persona_id)
+        if not persona:
+            continue
+        conv = await run_conversation(persona, prompt, config, llm_client, project_id)
+        completed += 1
+        if progress_callback:
+            progress_callback(completed, total, conv)
+        results.append(conv)
+        # Delay between probes (skip after last one)
+        if i < len(security_prompts) - 1:
+            await asyncio.sleep(probe_delay)
+
+    return results

@@ -236,10 +236,14 @@ async def generate_all_functional(
     llm_client: LLMClient,
     rag_text: str = "",
     ground_truth: list = [],
+    max_prompts: int = 0,   # Fix 35: 0 = no cap; >0 = cap total prompts to this value
 ) -> List[GeneratedPrompt]:
-    """Generate functional prompts for all personas in parallel.
+    """
+    Generate functional prompts for all personas in parallel.
     In RAG mode with ground truth: uses Q&A pairs directly (no LLM generation).
     In RAG mode without ground truth: generates via LLM grounded in knowledge base.
+
+    Fix 35: max_prompts caps the total output when config.num_scenarios is set.
     """
     from core.models import ApplicationType
     # Use ground truth Q&A pairs directly whenever they are provided — do not
@@ -248,7 +252,10 @@ async def generate_all_functional(
     # application_type dropdown.  ground_truth is only populated in pipeline.py
     # when config.is_rag is True, so this check is sufficient.
     if ground_truth:
-        return _ground_truth_to_prompts(ground_truth, personas)
+        result = _ground_truth_to_prompts(ground_truth, personas)
+        if max_prompts > 0:
+            result = result[:max_prompts]
+        return result
 
     sem = asyncio.Semaphore(5)
 
@@ -257,4 +264,9 @@ async def generate_all_functional(
             return await generate_functional_prompts(persona, profile, llm_client, rag_text=rag_text)
 
     batches = await asyncio.gather(*[_bounded(p) for p in personas])
-    return [prompt for batch in batches for prompt in batch]
+    result = [prompt for batch in batches for prompt in batch]
+
+    # Fix 35: apply num_scenarios cap when specified
+    if max_prompts > 0:
+        result = result[:max_prompts]
+    return result

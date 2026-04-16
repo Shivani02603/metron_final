@@ -23,6 +23,7 @@ from core.adapters.chatbot import ChatbotAdapter
 from core import db as _db
 from pipeline import run_pipeline
 from stages.s0_profile.document_parser import parse_document
+from stages.s0_profile.architecture_parser import parse_architecture_text, parse_architecture_image
 from stages.s1_personas.fishbone_builder import build_slots
 from stages.s1_personas.persona_builder import build_all_personas
 
@@ -192,6 +193,41 @@ async def parse_document_endpoint(req: ParseDocumentRequest):
         "success_criteria":  profile.success_criteria,
         "agents":            [a.model_dump() for a in profile.agents],
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# POST /api/parse-architecture — extract structured fields from doc or image
+# ──────────────────────────────────────────────────────────────────────────
+@app.post("/api/parse-architecture")
+async def parse_architecture_endpoint(
+    content:      str           = Form(""),
+    image:        Optional[UploadFile] = File(None),
+    llm_provider: str           = Form("Groq"),
+    llm_api_key:  str           = Form(""),
+):
+    """
+    Parse an architecture document (text) or diagram (image) and return
+    structured architecture fields ready to populate the configure form.
+
+    - content: raw text from an uploaded .txt / .pdf / .md document
+    - image:   an uploaded image file (PNG / JPG / WEBP) of an architecture diagram
+    """
+    import base64
+
+    if not content.strip() and not image:
+        raise HTTPException(400, "Provide either text content or an image file")
+
+    llm_client = LLMClient(llm_provider, llm_api_key)
+
+    if image:
+        raw_bytes  = await image.read()
+        b64_data   = base64.b64encode(raw_bytes).decode("utf-8")
+        mime_type  = image.content_type or "image/png"
+        result     = await parse_architecture_image(b64_data, mime_type, llm_client)
+    else:
+        result = await parse_architecture_text(content, llm_client)
+
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────────────

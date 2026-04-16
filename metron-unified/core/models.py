@@ -129,6 +129,29 @@ class RunConfig(BaseModel):
     # Feedback loop
     enable_feedback_loop: bool = True
 
+    # ── Architecture profile for RCA (Stage 8) ────────────────────────────
+    # Core infrastructure
+    deployment_type:   str = "unknown"   # "serverless" | "server" | "container" | "unknown"
+    vector_db:         str = ""          # "pinecone" | "weaviate" | "qdrant" | "faiss" | "chroma" | ""
+    session_db:        str = ""          # "redis" | "postgresql" | "mongodb" | "dynamodb" | "sqlite" | ""
+    # Extended infrastructure
+    cache_layer:       str = ""          # "redis" | "memcached" | "cdn" | "in_memory" | ""
+    message_queue:     str = ""          # "kafka" | "rabbitmq" | "sqs" | "pubsub" | "kinesis" | ""
+    api_gateway:       str = ""          # "aws_apigw" | "azure_apim" | "kong" | "nginx" | ""
+    auth_mechanism:    str = ""          # "oauth" | "api_key" | "jwt" | "saml" | ""
+    monitoring_tool:   str = ""          # "datadog" | "cloudwatch" | "prometheus" | "grafana" | "newrelic" | ""
+    is_multi_region:   bool = False
+    # Resilience flags
+    has_rate_limiting: bool = False
+    rate_limit_rpm:    Optional[int] = None
+    has_retry_logic:   bool = False
+    has_circuit_breaker: bool = False
+    has_caching:       bool = False
+    has_dlq:           bool = False      # dead-letter queue
+    # Free-form / uploaded content
+    additional_architecture_notes: str = ""   # free-form text (parsed by RCA mapper)
+    architecture_document:         str = ""   # full text from uploaded doc / LLM-extracted diagram desc
+
 
 # ── Stage 1: Personas ──────────────────────────────────────────────────────
 
@@ -278,6 +301,30 @@ class PersonaBreakdown(BaseModel):
     avg_score:    float
     pass_rate:    float
 
+class RCAFinding(BaseModel):
+    """A single probable root cause with probability and evidence."""
+    rank:          int
+    id:            str            # e.g. "C1.1"
+    label:         str            # human-readable failure point name
+    category:      str            # e.g. "AI / Model"
+    category_id:   str            # e.g. "C1"
+    probability:   float          # 0.0 – 1.0
+    affected_count: int           # number of failed prompts this likely caused
+    evidence:      List[str]      # list of observed signals that triggered this
+    remediation:   str            # short fix hint
+    reason:        str = ""       # detailed narrative explanation of why this was flagged
+
+class RCAReport(BaseModel):
+    """Output of Stage 8: Root Cause Analysis."""
+    total_failed:          int
+    total_analyzed:        int
+    relevant_points:       int                  # failure points after architecture filter
+    filtered_points:       int                  # failure points excluded by architecture
+    architecture_summary:  Dict[str, Any] = {}  # snapshot of arch config used
+    signal_summary:        Dict[str, int] = {}  # raw signal counts
+    top_causes:            List[RCAFinding] = []
+
+
 class AggregatedReport(BaseModel):
     run_id:           str
     project_id:       str
@@ -298,6 +345,7 @@ class AggregatedReport(BaseModel):
     feedback_applied: bool = False
     evaluation_warnings: List[str] = []   # cross-class warnings surfaced to UI
     report_html:      str  = ""
+    rca:              Optional[RCAReport] = None   # Stage 8 root cause analysis
 
 
 # ── Stage 6: Feedback Loop ─────────────────────────────────────────────────

@@ -34,6 +34,7 @@ from stages.s4_evaluation.rag import evaluate_rag
 from stages.s5_aggregation.aggregator import aggregate
 from stages.s6_feedback.feedback_loop import run_feedback_loop
 from stages.s7_report.report_generator import report_to_json, generate_html_report
+from stages.s8_rca.rca_mapper import run_rca
 
 
 # ── Progress helpers ───────────────────────────────────────────────────────
@@ -372,6 +373,30 @@ async def run_pipeline(
                 "effective_personas": effective,
             })
 
+        # ── Stage 8: Root Cause Analysis ──────────────────────────────────
+        _update(job_store, run_id, 94, "Running root cause analysis…", "rca")
+        _log(job_store, run_id, "phase_start", {"phase": "rca", "label": "Root Cause Analysis"})
+        try:
+            rca_report = run_rca(
+                metric_results=all_metric_results,
+                conversations=conversations,
+                config=config,
+                perf_metrics=perf_metrics,
+                load_metrics=load_metrics,
+            )
+            report.rca = rca_report
+            _log(job_store, run_id, "rca_complete", {
+                "total_failed":     rca_report.total_failed,
+                "relevant_points":  rca_report.relevant_points,
+                "filtered_points":  rca_report.filtered_points,
+                "top_cause":        rca_report.top_causes[0].label if rca_report.top_causes else "none",
+                "top_probability":  rca_report.top_causes[0].probability if rca_report.top_causes else 0.0,
+            })
+            _update(job_store, run_id, 96, f"RCA: {len(rca_report.top_causes)} root causes identified", "rca",
+                    {"top_cause": rca_report.top_causes[0].label if rca_report.top_causes else "none"})
+        except Exception as rca_err:
+            print(f"[Pipeline] RCA failed (non-fatal): {rca_err}")
+
         # ── Stage 7: Report Generation ─────────────────────────────────────
         _update(job_store, run_id, 97, "Generating report…", "report")
         _log(job_store, run_id, "phase_start", {"phase": "report", "label": "Generating Report"})
@@ -480,6 +505,10 @@ async def run_pipeline(
             for p in personas
         ]
         final_json["quality_criteria"] = quality_criteria
+
+        # Attach RCA to final JSON
+        if report.rca:
+            final_json["rca"] = report.rca.model_dump()
 
         job_store[run_id]["status"]   = "completed"
         job_store[run_id]["progress"] = 100

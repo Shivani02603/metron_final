@@ -71,13 +71,29 @@ def generate_html_report(report: AggregatedReport) -> str:
     failure_rows = ""
     for f in report.failure_drill_down[:10]:
         score_pct = int(f["score"] * 100)
+        tax_id    = f.get("failure_taxonomy_id", "")
+        tax_label = f.get("failure_taxonomy_label", "")
+        fail_rsn  = f.get("failure_reason", "")
+        # taxonomy badge + reason cell
+        if tax_id and tax_label:
+            rsn_html = (
+                "<br><span style=\"font-size:11px;color:#555\">" + fail_rsn[:200] + "</span>"
+                if fail_rsn else ""
+            )
+            reason_cell = (
+                '<span style="display:inline-block;background:#ede7f6;color:#6200ee;'
+                'border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;margin-bottom:4px">'
+                + tax_id + " · " + tax_label + "</span>" + rsn_html
+            )
+        else:
+            reason_cell = f.get("reason", "")[:150]
         failure_rows += f"""
         <tr>
           <td>{f.get('superset','')}</td>
           <td>{f.get('metric_name','')}</td>
           <td>{f.get('persona_name','')}</td>
           <td style="color:{'#ba1a1a' if score_pct<50 else '#ff8c00'}">{score_pct}%</td>
-          <td style="max-width:300px;word-wrap:break-word">{f.get('reason','')[:150]}</td>
+          <td style="max-width:320px;word-wrap:break-word">{reason_cell}</td>
         </tr>"""
 
     # RCA section

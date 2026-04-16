@@ -57,6 +57,9 @@ interface TestResult {
   passed: boolean;
   reasoning: string;
   latency_ms: number;
+  failure_taxonomy_id?: string;
+  failure_taxonomy_label?: string;
+  failure_reason?: string;
   details: Record<string, unknown>;
 }
 
@@ -676,6 +679,20 @@ function SecurityTab({ data }: { data: PhaseSummary }) {
                     {r.reasoning && (
                       <p className="text-xs text-[var(--color-on-surface-variant)] pl-8 leading-relaxed">{r.reasoning}</p>
                     )}
+                    {!r.passed && r.failure_reason && (
+                      <div className="p-3 rounded-lg border border-[#6200ee]/20 bg-[#6200ee]/5 space-y-1.5">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="material-symbols-outlined text-xs text-[#6200ee]">travel_explore</span>
+                          <p className="text-[10px] font-black uppercase tracking-wider text-[#6200ee]">Root Cause</p>
+                          {r.failure_taxonomy_id && r.failure_taxonomy_label && (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#ede7f6] text-[#6200ee]">
+                              {r.failure_taxonomy_id} · {r.failure_taxonomy_label}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-[var(--color-on-surface-variant)] leading-relaxed">{r.failure_reason}</p>
+                      </div>
+                    )}
                     <ConversationBlock
                       input={r.input_text}
                       output={r.output_text}
@@ -739,6 +756,20 @@ function QualityTab({ data }: { data: PhaseSummary }) {
                 <div className="p-3 rounded-lg bg-[var(--color-surface-container-low)]">
                   <p className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-on-surface-variant)] opacity-60 mb-1">Evaluation</p>
                   <p className="text-xs">{r.reasoning}</p>
+                </div>
+              )}
+              {!r.passed && r.failure_reason && (
+                <div className="p-3 rounded-lg border border-[#6200ee]/20 bg-[#6200ee]/5 space-y-1.5">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="material-symbols-outlined text-xs text-[#6200ee]">travel_explore</span>
+                    <p className="text-[10px] font-black uppercase tracking-wider text-[#6200ee]">Root Cause</p>
+                    {r.failure_taxonomy_id && r.failure_taxonomy_label && (
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#ede7f6] text-[#6200ee]">
+                        {r.failure_taxonomy_id} · {r.failure_taxonomy_label}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-[var(--color-on-surface-variant)] leading-relaxed">{r.failure_reason}</p>
                 </div>
               )}
               {/* Metric breakdown from details */}
@@ -849,6 +880,20 @@ function RAGTab({ data }: { data: PhaseSummary }) {
                   <div className="p-3 rounded-lg bg-[var(--color-surface-container-low)]">
                     <p className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-on-surface-variant)] opacity-60 mb-1">Evaluation</p>
                     <p className="text-xs">{r.reasoning}</p>
+                  </div>
+                )}
+                {!r.passed && r.failure_reason && (
+                  <div className="p-3 rounded-lg border border-[#6200ee]/20 bg-[#6200ee]/5 space-y-1.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="material-symbols-outlined text-xs text-[#6200ee]">travel_explore</span>
+                      <p className="text-[10px] font-black uppercase tracking-wider text-[#6200ee]">Root Cause</p>
+                      {r.failure_taxonomy_id && r.failure_taxonomy_label && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#ede7f6] text-[#6200ee]">
+                          {r.failure_taxonomy_id} · {r.failure_taxonomy_label}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-[var(--color-on-surface-variant)] leading-relaxed">{r.failure_reason}</p>
                   </div>
                 )}
               </div>
@@ -1103,6 +1148,20 @@ function TestResultRow({ result }: { result: TestResult }) {
           <ConversationBlock input={result.input_text} output={result.output_text} />
           {result.reasoning && (
             <p className="text-xs text-[var(--color-on-surface-variant)] italic">{result.reasoning}</p>
+          )}
+          {!result.passed && result.failure_reason && (
+            <div className="p-3 rounded-lg border border-[#6200ee]/20 bg-[#6200ee]/5 space-y-1.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="material-symbols-outlined text-xs text-[#6200ee]">travel_explore</span>
+                <p className="text-[10px] font-black uppercase tracking-wider text-[#6200ee]">Root Cause</p>
+                {result.failure_taxonomy_id && result.failure_taxonomy_label && (
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#ede7f6] text-[#6200ee]">
+                    {result.failure_taxonomy_id} · {result.failure_taxonomy_label}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-[var(--color-on-surface-variant)] leading-relaxed">{result.failure_reason}</p>
+            </div>
           )}
         </div>
       )}

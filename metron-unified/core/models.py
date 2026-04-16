@@ -274,6 +274,10 @@ class MetricResult(BaseModel):
     severity:            Optional[str]  = None
     pii_detected:        Optional[bool] = None
     pii_types:           Optional[List[str]] = None
+    # Per-prompt failure classification (Stage 8 sub-module)
+    failure_taxonomy_id:    Optional[str] = None   # e.g. "C1.9"
+    failure_taxonomy_label: Optional[str] = None   # e.g. "Missing Few-Shot Examples in System Prompt"
+    failure_reason:         Optional[str] = None   # 2-3 sentence specific explanation
 
 
 # ── Stage 5: Aggregated Report ─────────────────────────────────────────────

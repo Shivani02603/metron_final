@@ -35,6 +35,7 @@ from stages.s5_aggregation.aggregator import aggregate
 from stages.s6_feedback.feedback_loop import run_feedback_loop
 from stages.s7_report.report_generator import report_to_json, generate_html_report
 from stages.s8_rca.rca_mapper import run_rca
+from stages.s8_rca.prompt_classifier import classify_prompt_failures
 
 
 # ── Progress helpers ───────────────────────────────────────────────────────
@@ -397,6 +398,34 @@ async def run_pipeline(
         except Exception as rca_err:
             print(f"[Pipeline] RCA failed (non-fatal): {rca_err}")
 
+        # ── Per-prompt failure classification ──────────────────────────────
+        _update(job_store, run_id, 96, "Classifying per-prompt failure reasons…", "rca")
+        try:
+            all_metric_results = await classify_prompt_failures(
+                all_metric_results, config, llm_client
+            )
+            # Re-sync individual phase lists (they share the same objects, but re-assign for safety)
+            func_results = [r for r in all_metric_results if r.superset == "functional"]
+            sec_results  = [r for r in all_metric_results if r.superset == "security"]
+            qual_results = [r for r in all_metric_results if r.superset == "quality"]
+            rag_results  = [r for r in all_metric_results if r.superset == "rag"]
+
+            # Patch failure_drill_down (built before classification) with taxonomy fields
+            _clf_index = {
+                (r.metric_name, r.persona_name, r.prompt[:80]): r
+                for r in all_metric_results
+                if r.failure_taxonomy_id
+            }
+            for entry in report.failure_drill_down:
+                key = (entry.get("metric_name",""), entry.get("persona_name",""), entry.get("prompt","")[:80])
+                matched = _clf_index.get(key)
+                if matched:
+                    entry["failure_taxonomy_id"]    = matched.failure_taxonomy_id
+                    entry["failure_taxonomy_label"] = matched.failure_taxonomy_label
+                    entry["failure_reason"]         = matched.failure_reason
+        except Exception as clf_err:
+            print(f"[Pipeline] Per-prompt classifier failed (non-fatal): {clf_err}")
+
         # ── Stage 7: Report Generation ─────────────────────────────────────
         _update(job_store, run_id, 97, "Generating report…", "report")
         _log(job_store, run_id, "phase_start", {"phase": "report", "label": "Generating Report"})
@@ -416,7 +445,7 @@ async def run_pipeline(
 
         def _to_test_result(r: MetricResult) -> dict:
             return {
-                "test_id":    f"{r.metric_name}_{r.persona_id[:8]}_{r.conversation_id[:6]}",
+                "test_id":    f"{r.metric_name}_{r.persona_id[:8]}_{r.conversation_id}_{r.turn_number or 0}",
                 "test_name":  r.persona_name,
                 "category":   r.metric_name,   # full name — frontend maps to pretty label
                 "input_text": r.prompt,
@@ -425,6 +454,9 @@ async def run_pipeline(
                 "passed":     r.passed,
                 "reasoning":  r.reason,
                 "latency_ms": r.latency_ms or 0.0,
+                "failure_taxonomy_id":    r.failure_taxonomy_id,
+                "failure_taxonomy_label": r.failure_taxonomy_label,
+                "failure_reason":         r.failure_reason,
                 "details": {
                     "severity":            r.severity,
                     "owasp_category":      r.owasp_category,

@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from core.llm_client import LLMClient
 from core.models import (
@@ -32,7 +32,6 @@ from stages.s4_evaluation.performance import evaluate_performance
 from stages.s4_evaluation.load import evaluate_load
 from stages.s4_evaluation.rag import evaluate_rag
 from stages.s5_aggregation.aggregator import aggregate
-from stages.s6_feedback.feedback_loop import run_feedback_loop
 from stages.s7_report.report_generator import report_to_json, generate_html_report
 from stages.s8_rca.rca_mapper import run_rca
 from stages.s8_rca.prompt_classifier import classify_prompt_failures
@@ -320,59 +319,6 @@ async def run_pipeline(
             # Fix 34: agent_name now lives on AggregatedReport (not added post-hoc)
             agent_name=config.agent_name or (profile.domain.capitalize() + " Agent"),
         )
-
-        # ── Stage 6: Feedback Loop ─────────────────────────────────────────
-        if config.enable_feedback_loop:
-            _update(job_store, run_id, 90, "Running adaptive feedback loop…", "feedback")
-            _log(job_store, run_id, "phase_start", {"phase": "feedback", "label": "Adaptive Feedback Loop"})
-
-            async def _run_stages_on_new_slots(
-                new_slots: List[Dict], profile: AppProfile,
-                config: RunConfig, llm_client: LLMClient,
-            ) -> Tuple[List[MetricResult], List[Conversation], List[Persona]]:
-                new_personas = await build_all_personas(new_slots, profile, llm_client, project_id)
-                # Pass ground_truth so the feedback pass uses the same canonical
-                # question set as the first pass.  Without this, genuine personas
-                # created by the feedback loop fall through to LLM generation and
-                # produce off-topic prompts that dilute the ground-truth results.
-                new_func = await generate_all_functional(
-                    new_personas, profile, llm_client,
-                    rag_text=rag_text,
-                    ground_truth=config.ground_truth if config.is_rag else [],
-                )
-                new_sec  = await generate_all_security(new_personas, profile, llm_client,
-                                                       config.selected_attacks, config.attacks_per_category)
-                new_convs = await run_all_conversations(new_personas, new_func + new_sec, config, llm_client, project_id)
-                new_func_r = await evaluate_functional(new_convs, new_personas, config, llm_client, quality_criteria)
-                new_sec_r  = await evaluate_security(new_convs, new_personas, config, llm_client)
-                new_qual_r = await evaluate_quality(new_convs, new_personas, config, llm_client, quality_criteria)
-                return new_func_r + new_sec_r + new_qual_r, new_convs, new_personas
-
-            def fb_progress(pct: int, msg: str):
-                _update(job_store, run_id, pct, msg, "feedback")
-
-            original_persona_count = len(personas)
-            report, personas = await run_feedback_loop(
-                report=report,
-                profile=profile,
-                personas=personas,
-                config=config,
-                llm_client=llm_client,
-                run_stages_fn=_run_stages_on_new_slots,
-                progress_callback=fb_progress,
-                original_metric_results=all_metric_results,   # Fix 17
-            )
-            new_personas_added = len(personas) - original_persona_count
-            effective = sum(1 for pb in report.persona_breakdown if hasattr(pb, "pass_rate") and pb.pass_rate < 50)
-            _log(job_store, run_id, "feedback_complete", {
-                "new_personas_count": new_personas_added,
-                "effective_personas": effective,
-                "new_persona_names": [p.name for p in personas[original_persona_count:]],
-            })
-            _update(job_store, run_id, 97, "Feedback loop complete", "feedback", {
-                "new_personas_count": new_personas_added,
-                "effective_personas": effective,
-            })
 
         # ── Stage 8: Root Cause Analysis ──────────────────────────────────
         _update(job_store, run_id, 94, "Running root cause analysis…", "rca")

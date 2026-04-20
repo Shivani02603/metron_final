@@ -35,18 +35,24 @@ LOAD_TEST_PROMPTS = [
 
 # ── Locust file template ───────────────────────────────────────────────────────
 # Values are injected via json.dumps for safe string encoding.
+# When _REQUEST_TEMPLATE is non-empty, it is rendered per-request with {{query}}
+# and {{uuid}} substituted; {{conversation_id}} also gets a fresh UUID per request
+# (load test has no multi-turn sessions, so each request is its own conversation).
 
 _LOCUST_FILE_TEMPLATE = textwrap.dedent("""\
     import json
     import random
+    import uuid as _uuid_mod
     from locust import HttpUser, task, between
 
-    _PROMPTS        = {prompts_json}
-    _REQUEST_FIELD  = {request_field_json}
-    _RESPONSE_FIELD = {response_field_json}
-    _AUTH_TYPE      = {auth_type_json}
-    _AUTH_TOKEN     = {auth_token_json}
-    _PATH           = {path_json}
+    _PROMPTS           = {prompts_json}
+    _REQUEST_FIELD     = {request_field_json}
+    _RESPONSE_FIELD    = {response_field_json}
+    _AUTH_TYPE         = {auth_type_json}
+    _AUTH_TOKEN        = {auth_token_json}
+    _PATH              = {path_json}
+    _REQUEST_TEMPLATE  = {request_template_json}
+    _TRIM_MARKER       = {trim_marker_json}
 
 
     class AIEndpointUser(HttpUser):
@@ -59,15 +65,26 @@ _LOCUST_FILE_TEMPLATE = textwrap.dedent("""\
 
         @task
         def send_request(self):
-            prompt  = random.choice(_PROMPTS)
-            payload = {{_REQUEST_FIELD: prompt}}
+            prompt = random.choice(_PROMPTS)
+            if _REQUEST_TEMPLATE:
+                body_str = (
+                    _REQUEST_TEMPLATE
+                    .replace("{{{{query}}}}", prompt)
+                    .replace("{{{{uuid}}}}", str(_uuid_mod.uuid4()))
+                    .replace("{{{{conversation_id}}}}", str(_uuid_mod.uuid4()))
+                )
+                payload = json.loads(body_str)
+            else:
+                payload = {{_REQUEST_FIELD: prompt}}
             with self.client.post(
                 _PATH, json=payload, catch_response=True, name="AI Endpoint"
             ) as response:
                 if response.status_code == 200:
                     try:
                         data = response.json()
-                        if _RESPONSE_FIELD in data:
+                        # Verify response field reachable (dot-notation first segment)
+                        top_key = _RESPONSE_FIELD.split(".")[0]
+                        if top_key in data or not _RESPONSE_FIELD:
                             response.success()
                         else:
                             response.failure(
@@ -90,12 +107,14 @@ def _build_locust_file(config: RunConfig, path: str) -> str:
     endpoint = parsed.path or "/"
 
     content = _LOCUST_FILE_TEMPLATE.format(
-        prompts_json       = json.dumps(LOAD_TEST_PROMPTS),
-        request_field_json = json.dumps(config.request_field),
-        response_field_json= json.dumps(config.response_field),
-        auth_type_json     = json.dumps(config.auth_type),
-        auth_token_json    = json.dumps(config.auth_token),
-        path_json          = json.dumps(endpoint),
+        prompts_json          = json.dumps(LOAD_TEST_PROMPTS),
+        request_field_json    = json.dumps(config.request_field),
+        response_field_json   = json.dumps(config.response_field),
+        auth_type_json        = json.dumps(config.auth_type),
+        auth_token_json       = json.dumps(config.auth_token),
+        path_json             = json.dumps(endpoint),
+        request_template_json = json.dumps(getattr(config, "request_template", None) or ""),
+        trim_marker_json      = json.dumps(getattr(config, "response_trim_marker", None) or ""),
     )
     Path(path).write_text(content, encoding="utf-8")
     return host
@@ -160,7 +179,18 @@ async def _preflight_check(config: RunConfig) -> None:
     Does NOT raise — Locust still runs even if preflight fails.
     """
     try:
-        payload  = json.dumps({config.request_field: LOAD_TEST_PROMPTS[0]}).encode()
+        import uuid as _uuid_mod
+        request_template = getattr(config, "request_template", None)
+        if request_template:
+            body_str = (
+                request_template
+                .replace("{{query}}", LOAD_TEST_PROMPTS[0])
+                .replace("{{uuid}}", str(_uuid_mod.uuid4()))
+                .replace("{{conversation_id}}", str(_uuid_mod.uuid4()))
+            )
+            payload = body_str.encode()
+        else:
+            payload = json.dumps({config.request_field: LOAD_TEST_PROMPTS[0]}).encode()
         headers  = {"Content-Type": "application/json"}
         if config.auth_type == "bearer" and config.auth_token:
             headers["Authorization"] = f"Bearer {config.auth_token}"

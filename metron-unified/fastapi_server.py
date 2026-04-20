@@ -166,6 +166,8 @@ async def connect_test(req: ConnectTestRequest):
         response_field=req.response_field,
         auth_type=req.auth_type,
         auth_token=req.auth_token,
+        request_template=req.request_template,
+        response_trim_marker=req.response_trim_marker,
     )
     success, message = await adapter.test_connection()
     return {"success": success, "message": message}

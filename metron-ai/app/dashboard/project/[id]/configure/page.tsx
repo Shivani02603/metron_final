@@ -35,6 +35,8 @@ export default function ConfigurePage() {
   const [responseField, setResponseField] = useState("response");
   const [authType, setAuthType] = useState<"none" | "bearer">("none");
   const [authToken, setAuthToken] = useState("");
+  const [requestTemplate, setRequestTemplate] = useState("");
+  const [responseTrimMarker, setResponseTrimMarker] = useState("");
   const [connectionStatus, setConnectionStatus] = useState<"idle" | "testing" | "ok" | "fail">("idle");
   const [connectionMsg, setConnectionMsg] = useState("");
 
@@ -149,6 +151,8 @@ export default function ConfigurePage() {
           response_field: responseField,
           auth_type: authType,
           auth_token: authToken,
+          request_template: requestTemplate || null,
+          response_trim_marker: responseTrimMarker || null,
         }),
       });
       const data = await res.json();
@@ -239,6 +243,8 @@ export default function ConfigurePage() {
       response_field: responseField,
       auth_type: authType,
       auth_token: authToken,
+      request_template: requestTemplate || null,
+      response_trim_marker: responseTrimMarker || null,
       agent_name: agentName,
       agent_domain: agentDomain,
       agent_description: agentDescription,
@@ -384,9 +390,32 @@ export default function ConfigurePage() {
             </Field>
             <Field label="Request Field">
               <input className="input-field" placeholder="message" value={requestField} onChange={(e) => setRequestField(e.target.value)} />
+              <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-50 mt-1">Ignored when Request Template is set.</p>
             </Field>
-            <Field label="Response Field">
-              <input className="input-field" placeholder="response" value={responseField} onChange={(e) => setResponseField(e.target.value)} />
+            <Field label="Response Field (dot-notation)">
+              <input className="input-field" placeholder="response  or  result.artifacts.0.parts.0.text" value={responseField} onChange={(e) => setResponseField(e.target.value)} />
+            </Field>
+            <Field label="Request Template (optional — for complex APIs)">
+              <textarea
+                className="input-field resize-none h-[110px] font-mono text-xs"
+                placeholder={'{\n  "id": "{{uuid}}",\n  "message": "{{query}}",\n  "sessionId": "{{conversation_id}}"\n}'}
+                value={requestTemplate}
+                onChange={(e) => setRequestTemplate(e.target.value)}
+              />
+              <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-50 mt-1">
+                Full JSON body. Use <code>{"{{query}}"}</code> for the message, <code>{"{{uuid}}"}</code> for a per-request UUID, <code>{"{{conversation_id}}"}</code> for a per-conversation UUID (stable across multi-turn).
+              </p>
+            </Field>
+            <Field label="Response Trim Marker (optional)">
+              <input
+                className="input-field font-mono text-xs"
+                placeholder="FOLLOW UP QUESTIONS"
+                value={responseTrimMarker}
+                onChange={(e) => setResponseTrimMarker(e.target.value)}
+              />
+              <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-50 mt-1">
+                Text at or after this marker is stripped from every response before evaluation.
+              </p>
             </Field>
           </div>
           <div className="space-y-4">

@@ -129,6 +129,18 @@ class RunConfig(BaseModel):
     # Feedback loop
     enable_feedback_loop: bool = True
 
+    # ── Advanced request/response templating ──────────────────────────────
+    # Set request_template to a full JSON body string with placeholders:
+    #   {{query}}           — replaced with the test message
+    #   {{uuid}}            — replaced with a new UUID on every request
+    #   {{conversation_id}} — replaced with a UUID stable for all turns of one conversation
+    # When set, request_field is ignored for body construction (response_field still used for extraction).
+    request_template:     Optional[str] = None
+
+    # Trim response text at this marker (e.g. "FOLLOW UP QUESTIONS").
+    # Everything at and after the marker is discarded before evaluation.
+    response_trim_marker: Optional[str] = None
+
     # ── Architecture profile for RCA (Stage 8) ────────────────────────────
     # Core infrastructure
     deployment_type:   str = "unknown"   # "serverless" | "server" | "container" | "unknown"
@@ -391,11 +403,13 @@ class PreviewRequest(BaseModel):
     llm_api_key:       str = ""
 
 class ConnectTestRequest(BaseModel):
-    endpoint_url:   str
-    request_field:  str = "message"
-    response_field: str = "response"
-    auth_type:      str = "none"
-    auth_token:     str = ""
+    endpoint_url:         str
+    request_field:        str = "message"
+    response_field:       str = "response"
+    auth_type:            str = "none"
+    auth_token:           str = ""
+    request_template:     Optional[str] = None
+    response_trim_marker: Optional[str] = None
 
 class ParseDocumentRequest(BaseModel):
     document_text:   str

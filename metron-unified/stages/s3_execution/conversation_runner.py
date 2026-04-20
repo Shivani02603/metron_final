@@ -73,6 +73,8 @@ def _get_adapter(config: RunConfig) -> object:
         response_field=config.response_field,
         auth_type=config.auth_type,
         auth_token=config.auth_token,
+        request_template=getattr(config, "request_template", None),
+        response_trim_marker=getattr(config, "response_trim_marker", None),
     )
     if config.application_type == ApplicationType.RAG:
         return RAGAdapter(**kwargs)
@@ -112,12 +114,14 @@ async def run_conversation(
     current_message = prompt.text   # Start with the generated prompt
     history_lines: List[str] = []
 
+    conv_id = conversation.conversation_id
+
     for turn_num in range(1, max_turns + 1):
         # Send to adapter — retry once on 429 (target endpoint rate limit)
-        resp: AdapterResponse = await adapter.send(current_message)
+        resp: AdapterResponse = await adapter.send(current_message, conversation_id=conv_id)
         if resp.error and "429" in str(resp.error):
             await asyncio.sleep(2)
-            resp = await adapter.send(current_message)
+            resp = await adapter.send(current_message, conversation_id=conv_id)
         latency_ms = resp.latency_ms
 
         # Detect error response — includes field-not-found and HTTP errors

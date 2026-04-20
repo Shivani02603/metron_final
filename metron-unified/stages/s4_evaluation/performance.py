@@ -71,6 +71,8 @@ async def evaluate_performance(
         auth_type=config.auth_type,
         auth_token=config.auth_token,
         timeout=30,
+        request_template=getattr(config, "request_template", None),
+        response_trim_marker=getattr(config, "response_trim_marker", None),
     )
 
     BATCH = 5

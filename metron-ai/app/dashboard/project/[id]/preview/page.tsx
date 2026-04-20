@@ -93,6 +93,8 @@ export default function PreviewPage() {
         response_field: cfg.response_field,
         auth_type: cfg.auth_type,
         auth_token: cfg.auth_token,
+        request_template: cfg.request_template || null,
+        response_trim_marker: cfg.response_trim_marker || null,
         agent_name: cfg.agent_name,
         agent_domain: cfg.agent_domain,
         agent_description: cfg.agent_description,
@@ -107,6 +109,10 @@ export default function PreviewPage() {
         llm_provider: cfg.llm_provider,
         llm_api_key: cfg.llm_api_key,
         application_type: cfg.application_type || "chatbot",
+        selected_attacks: cfg.selected_attacks,
+        attacks_per_category: cfg.attacks_per_category,
+        deployment_type: cfg.deployment_type,
+        additional_architecture_notes: cfg.additional_architecture_notes,
       }));
 
       // Attach RAG knowledge base document if present

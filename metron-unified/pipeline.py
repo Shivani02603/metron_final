@@ -28,6 +28,8 @@ from core.models import (
 
 # Stage imports
 from stages.s0_profile.document_parser import parse_document, build_profile_from_config
+from stages.s0_profile.technical_extractor import extract_technical_profile
+from core.attack_surface_mapper import map_attack_surface
 from stages.s1_personas.fishbone_builder import build_slots
 from stages.s1_personas.persona_builder import build_all_personas, build_persona
 from stages.s1_personas.coverage_validator import validate_and_fill
@@ -108,16 +110,34 @@ async def run_pipeline(
                 project_id=project_id,
             )
 
+        # ── Stage 0b: Technical Profile Extraction ────────────────────────
+        # Second LLM pass: extracts 24-category technical attack surface from
+        # the seed document. Used to generate stack-specific red-team probes.
+        # Runs only when a document is provided; pipeline continues if it fails.
+        tech_profile = None
+        attack_vectors = []
+        if doc_text.strip():
+            _update(job_store, run_id, 7, "Extracting technical attack surface…", "profiling")
+            tech_profile = await extract_technical_profile(doc_text, llm_client)
+            attack_vectors = map_attack_surface(tech_profile)
+            _log(job_store, run_id, "technical_profile", {
+                "vectors_found": len(attack_vectors),
+                "summary": tech_profile.extraction_summary[:200] if tech_profile.extraction_summary else "",
+                "authorized_actions": tech_profile.authorized_actions[:5],
+                "output_destinations": tech_profile.output_destinations[:3],
+                "compliance_frameworks": tech_profile.compliance_frameworks,
+            })
+
         # ── Stage 1: Persona Generation (Fishbone) ─────────────────────────
         _update(job_store, run_id, 10, "Building persona coverage matrix…", "personas")
         _log(job_store, run_id, "phase_start", {"phase": "personas", "label": "Persona Generation"})
         slots = build_slots(profile, num_personas=config.num_personas)
-        personas = await build_all_personas(slots, profile, llm_client, project_id)
+        personas = await build_all_personas(slots, profile, llm_client, project_id, tech_profile)
 
         # Coverage validation (adds up to 3 more slots if gaps found)
         extra_slots = await validate_and_fill(personas, profile, llm_client)
         if extra_slots:
-            extra_personas = await build_all_personas(extra_slots, profile, llm_client, project_id)
+            extra_personas = await build_all_personas(extra_slots, profile, llm_client, project_id, tech_profile)
             personas.extend(extra_personas)
 
         # Emit one event per persona
@@ -147,11 +167,13 @@ async def run_pipeline(
             max_prompts=config.num_scenarios or 0,   # Fix 35: wire UI num_scenarios cap
         )
 
-        # 2b: Security prompts (adversarial personas only)
+        # 2b: Security prompts (adversarial personas only) + technical probes
         sec_prompts = await generate_all_security(
             personas, profile, llm_client,
             selected_categories=config.selected_attacks,
             attacks_per_category=config.attacks_per_category,
+            attack_vectors=attack_vectors,
+            tech_profile=tech_profile,
         )
 
         # 2c: Quality criteria

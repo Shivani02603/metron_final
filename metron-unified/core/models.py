@@ -79,6 +79,139 @@ class AppProfile(BaseModel):
     raw_document:     str = ""
 
 
+# ── Stage 0b: Technical Profile (extracted from architecture doc) ──────────
+
+class TechnicalProfile(BaseModel):
+    """
+    Generic technical intelligence extracted from any AI application document.
+    24 categories covering every attack surface a red-team professional would
+    look for — independent of the specific technology stack found.
+    Populated by stages/s0_profile/technical_extractor.py.
+    Consumed by attack_surface_mapper.py → security_gen.py + persona_builder.py.
+    """
+    # 1. LLM Context Structure — what reaches the model and in which role
+    llm_context_messages: List[str] = []            # e.g. ["system", "user_metadata", "query"]
+    user_controlled_in_system_prompt: List[str] = [] # user-supplied fields injected into system role
+    injected_metadata_fields: List[str] = []         # e.g. ["team_id", "user_email", "role"]
+
+    # 2. Authentication & Identity
+    auth_type: str = ""                              # "jwt" | "api_key" | "oauth" | "session" | "none"
+    auth_preprocessing: List[str] = []              # e.g. ["suffix_stripping", "base64_decode", "header_split"]
+    identity_fields_in_context: List[str] = []      # identity fields passed to LLM e.g. ["user_id", "role"]
+    identity_controls_behavior: bool = False         # does identity affect model selection or permissions
+
+    # 3. Configuration Controls — runtime parameters that change system behavior
+    config_controls_model: bool = False              # e.g. team_id → model selection
+    config_parameters: List[str] = []               # config params that affect behavior
+    user_influenced_config: List[str] = []          # config params user can influence or supply
+
+    # 4. Tools and Capabilities — what the system can DO beyond answering
+    authorized_actions: List[str] = []              # e.g. ["send_email", "read_calendar", "delete_file"]
+    tool_invocation_model: str = ""                 # "llm_decided" | "rule_based" | "both"
+    external_systems_accessible: List[str] = []     # e.g. ["smtp", "calendar_api", "sharepoint", "postgres"]
+
+    # 5. Data Access Scope
+    data_sources: List[str] = []                    # e.g. ["user_emails", "vector_db", "postgres"]
+    retrieval_scope: str = ""                       # "per_user" | "shared" | "global" | "unknown"
+    output_persisted: bool = False
+    output_persistence_target: str = ""             # where LLM output is stored
+
+    # 6. Output Destinations — where the response goes after generation
+    output_destinations: List[str] = []             # e.g. ["email_body", "browser_render", "database", "downstream_api"]
+    output_rendered_as: str = ""                    # "html" | "markdown" | "plain_text" | "json"
+
+    # 7. Input Sources — what reaches the LLM besides the typed message
+    additional_input_sources: List[str] = []        # e.g. ["email_headers", "file_upload", "db_lookup", "external_api"]
+    external_data_injected_unsanitized: bool = False
+
+    # 8. Logging and Observability
+    logging_targets: List[str] = []                 # e.g. ["kafka", "cloudwatch", "postgres", "splunk"]
+    llm_output_logged: bool = False
+    log_searchable: bool = False                    # logs indexed and queryable
+
+    # 9. Error and Fallback Behavior
+    fallback_models: List[str] = []                 # weaker models used when primary fails
+    error_info_exposed: List[str] = []              # info in error responses: "stack_trace" | "model_name" | "internal_url"
+    fallback_path_exists: bool = False
+
+    # 10. Hardcoded Values and Known Strings — literal secrets/tokens found in doc
+    hardcoded_strings: List[str] = []               # literal tokens, keys, suffixes, passwords
+    known_internal_identifiers: List[str] = []      # routing keys, team IDs, env var names
+
+    # 11. Infrastructure and Deployment
+    deployment_type: str = ""                       # "serverless" | "container" | "server" | "unknown"
+    inter_service_trust: str = ""                   # "mutual_tls" | "shared_secret" | "none" | "unknown"
+    execution_boundaries: List[str] = []            # e.g. ["lambda", "k8s_pod", "ecs_task"]
+
+    # 12. Session and State
+    session_persistence: List[str] = []             # where session stored e.g. ["redis", "postgres"]
+    history_feeds_prompt: bool = False              # prior turns injected into future prompts
+    cross_session_state: bool = False               # state persists across separate sessions
+
+    # 13. Prompt Template Storage
+    template_storage: str = ""                      # "hardcoded" | "database" | "config_file" | "cms" | "environment"
+    template_modifiable_by: str = ""                # "admin" | "user" | "none" | "unknown"
+
+    # 14. Multi-Tenancy and Isolation
+    has_multi_tenancy: bool = False
+    tenant_identifier: str = ""                     # e.g. "team_id", "org_id", "workspace_id"
+    tenant_identifier_source: str = ""              # "jwt_claim" | "request_header" | "request_body" | "subdomain"
+    isolation_mechanism: str = ""                   # "row_level_security" | "separate_db" | "filter_param" | "none"
+
+    # 15. Caching
+    response_caching: bool = False
+    cache_key_fields: List[str] = []               # fields used to construct cache key
+    cache_scope: str = ""                          # "per_user" | "shared" | "per_session" | "global"
+
+    # 16. Content Filtering
+    pre_llm_filters: List[str] = []               # filters applied BEFORE LLM call
+    post_llm_filters: List[str] = []              # filters applied AFTER LLM response
+    filter_implementation: str = ""               # "regex" | "classifier" | "llm_judge" | "external_api" | "blocklist"
+
+    # 17. Human-in-the-Loop Controls
+    has_hitl: bool = False
+    hitl_trigger_threshold: str = ""              # what triggers human review (confidence score, category, etc.)
+    hitl_approval_required: bool = False
+
+    # 18. User Permission Model
+    user_roles: List[str] = []                    # e.g. ["admin", "user", "guest", "internal"]
+    role_validation_location: str = ""            # "server_side" | "client_side" | "middleware" | "unknown"
+    role_controls_capabilities: bool = False
+
+    # 19. Async and Queue Processing
+    has_async_processing: bool = False
+    queue_technology: str = ""                    # "kafka" | "sqs" | "rabbitmq" | "pubsub"
+    async_skips_validation: bool = False          # async path has weaker validation than sync
+
+    # 20. File and Document Processing
+    accepted_file_types: List[str] = []          # e.g. ["pdf", "docx", "html", "csv", "txt"]
+    file_parser_technology: str = ""             # "pypdf" | "docx" | "tika" | "custom"
+    file_content_sanitized: bool = True          # False = file content injected raw into prompt
+
+    # 21. Conversation History Retrieval
+    history_retrieval_method: str = ""           # "all_turns" | "summary" | "vector_search" | "last_n"
+    history_scope: str = ""                     # "per_user" | "per_session" | "per_conversation" | "global"
+    history_injectable: bool = False            # history retrieval can be manipulated by user input
+
+    # 22. Feedback and Ratings
+    has_feedback_mechanism: bool = False
+    feedback_influences_behavior: bool = False   # ratings affect future responses / fine-tuning
+    feedback_stored_where: str = ""
+
+    # 23. Compliance and Regulatory Scope
+    compliance_frameworks: List[str] = []       # e.g. ["HIPAA", "GDPR", "SOC2", "PCI", "FERPA"]
+    regulated_data_types: List[str] = []        # e.g. ["PII", "PHI", "PCI", "financial"]
+    audit_trail_required: bool = False
+
+    # 24. Output Post-Processing
+    post_processing_steps: List[str] = []       # e.g. ["redaction", "truncation", "formatting", "translation"]
+    redaction_implemented: bool = False
+    output_format_enforced: str = ""            # "json" | "markdown" | "plain" | "html" | "none"
+
+    # Summary generated by LLM extractor
+    extraction_summary: str = ""
+
+
 # ── Run Configuration (from configure form) ────────────────────────────────
 
 class RunConfig(BaseModel):

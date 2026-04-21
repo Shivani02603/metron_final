@@ -55,7 +55,9 @@ async def parse_document(
     project_id: str = "",
 ) -> AppProfile:
     """Extract AppProfile from seed document using LLM."""
-    prompt = EXTRACTION_PROMPT.format(document=document_text[:4000])
+    # Increased from 4000 to 8000 chars so longer specs aren't silently truncated.
+    # Most LLMs support 128K+ context; 8000 chars is still well within safe limits.
+    prompt = EXTRACTION_PROMPT.format(document=document_text[:8000])
     try:
         data = await llm_client.complete_json(
             prompt,
@@ -84,7 +86,25 @@ async def parse_document(
         for a in data.get("agents", [])
     ]
 
-    app_type_raw = data.get("application_type", "chatbot").lower()
+    # Normalize LLM output before enum lookup — handles variants like
+    # "multi agent", "multiagent", "CHATBOT", "Chat Bot", etc.
+    _TYPE_ALIASES = {
+        "chatbot":    "chatbot",
+        "chat":       "chatbot",
+        "chat bot":   "chatbot",
+        "rag":        "rag",
+        "retrieval":  "rag",
+        "multi_agent":  "multi_agent",
+        "multiagent":   "multi_agent",
+        "multi agent":  "multi_agent",
+        "multi-agent":  "multi_agent",
+        "form":       "form",
+        "form_based": "form",
+    }
+    app_type_raw = _TYPE_ALIASES.get(
+        data.get("application_type", "chatbot").lower().strip(),
+        data.get("application_type", "chatbot").lower().strip(),
+    )
     try:
         app_type = ApplicationType(app_type_raw)
     except ValueError:

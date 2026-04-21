@@ -121,7 +121,8 @@ async def generate_new_slots(
         required = {"user_type", "expertise", "emotional_state", "intent", "goal_type"}
         valid = [s for s in slots[:3] if required.issubset(s.keys())]
         return valid
-    except Exception:
+    except Exception as e:
+        print(f"[FeedbackLoop] New slot generation failed — no additional personas will be added. Error: {e}")
         return []
 
 

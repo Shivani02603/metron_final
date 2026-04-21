@@ -50,9 +50,10 @@ def aggregate(
     if performance_metrics:
         total_perf  = performance_metrics.get("total_requests", 0)
         passed_perf = performance_metrics.get("successful", 0)
-        avg_lat = performance_metrics.get("avg_latency_ms", 0.0)
-        p95     = performance_metrics.get("p95_latency_ms", 0.0)
-        score   = max(0.0, 1.0 - (p95 / 10000.0))
+        avg_lat    = performance_metrics.get("avg_latency_ms", 0.0)
+        p95        = performance_metrics.get("p95_latency_ms", 0.0)
+        perf_cap   = float(THRESHOLDS["performance_latency_ms"])
+        score      = max(0.0, 1.0 - (p95 / perf_cap))
         test_classes["performance"] = ClassSummary(
             total=total_perf,
             passed=passed_perf,
@@ -63,10 +64,17 @@ def aggregate(
         )
 
     if load_metrics:
-        total_load  = load_metrics.get("total_requests", 0)
-        passed_load = load_metrics.get("successful", 0)
-        p95_load    = load_metrics.get("p95_latency_ms", 0.0)
-        score_load  = max(0.0, 1.0 - (load_metrics.get("error_rate", 0) / 100.0))
+        total_load     = load_metrics.get("total_requests", 0)
+        passed_load    = load_metrics.get("successful", 0)
+        p95_load       = load_metrics.get("p95_latency_ms", 0.0)
+        load_error_rate = load_metrics.get("error_rate", 0.0)
+        load_cap_ms    = float(THRESHOLDS["performance_latency_ms"])
+        # Blended score: 60% error-rate health + 40% latency health.
+        # Previously only error_rate was used — a slow-but-reliable endpoint
+        # (0% errors, 30s p95) incorrectly scored 1.0 (perfect).
+        error_health   = max(0.0, 1.0 - (load_error_rate / 100.0))
+        latency_health = max(0.0, 1.0 - (p95_load / load_cap_ms))
+        score_load     = round(0.6 * error_health + 0.4 * latency_health, 4)
         test_classes["load"] = ClassSummary(
             total=total_load,
             passed=passed_load,

@@ -94,6 +94,10 @@ class ChatbotAdapter:
                         return AdapterResponse("", latency, error=f"HTTP {resp.status}")
                     data = await resp.json(content_type=None)
                     text = self._trim_response(self._extract(data, self.response_field))
+                    # Extraction errors go into the error field so evaluators
+                    # never receive internal sentinel strings as real responses.
+                    if text.startswith(("[Field ", "[Index ", "[Empty")):
+                        return AdapterResponse("", latency, error=text)
                     return AdapterResponse(text, latency)
         except aiohttp.ClientConnectorError as e:
             latency = (time.monotonic() - start) * 1000

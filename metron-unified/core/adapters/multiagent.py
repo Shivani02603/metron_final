@@ -84,6 +84,8 @@ class MultiAgentAdapter:
                     data = await resp.json(content_type=None)
                     text  = self._trim_response(self._extract_text(data))
                     trace = self._extract_trace(data)
+                    if text.startswith(("[Field ", "[Index ", "[Empty")):
+                        return AdapterResponse("", latency, error=text, agent_trace=trace)
                     return AdapterResponse(text, latency, agent_trace=trace)
         except Exception as e:
             latency = (time.monotonic() - start) * 1000
@@ -99,15 +101,16 @@ class MultiAgentAdapter:
                 idx = int(p)
                 result = result[idx] if 0 <= idx < len(result) else None
                 if result is None:
-                    break
+                    return f"[Index '{p}' out of bounds]"
             else:
-                break
+                # Configured field not found — try well-known answer field names as fallback
+                for key in _FINAL_ANSWER_CANDIDATES:
+                    if key in data:
+                        return str(data[key])
+                return f"[Field '{p}' not found]"
         if result is not None and result != data:
             return str(result)
-        for key in _FINAL_ANSWER_CANDIDATES:
-            if key in data:
-                return str(data[key])
-        return "[No final answer field found]"
+        return "[Empty response]"
 
     @staticmethod
     def _extract_trace(data: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:

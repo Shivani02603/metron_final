@@ -9,6 +9,7 @@ Sourced from new metron-backend/app/stage4_execution/conversation_runner.py.
 
 from __future__ import annotations
 import asyncio
+import json as _json_mod
 from datetime import datetime
 from typing import List, Optional
 
@@ -25,6 +26,23 @@ from core.models import (
 
 
 _DEFAULT_MAX_TURNS = 3   # fallback when config.conversation_turns is absent
+
+
+def _format_for_eval(text: str) -> str:
+    """
+    Format an AI response for persona evaluation.
+    If the response is valid JSON, pretty-prints it so the evaluator LLM
+    understands it is structured output (e.g. an email object) rather than
+    treating raw compact JSON as a confusing or unhelpful reply.
+    """
+    stripped = text.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            parsed = _json_mod.loads(stripped)
+            return _json_mod.dumps(parsed, indent=2)
+        except (_json_mod.JSONDecodeError, ValueError):
+            pass
+    return text
 
 COMBINED_TURN_PROMPT = """
 Do two things at once:
@@ -73,6 +91,7 @@ def _get_adapter(config: RunConfig) -> object:
         response_field=config.response_field,
         auth_type=config.auth_type,
         auth_token=config.auth_token,
+        timeout=getattr(config, "adapter_timeout", 60),
         request_template=getattr(config, "request_template", None),
         response_trim_marker=getattr(config, "response_trim_marker", None),
     )
@@ -107,8 +126,13 @@ async def run_conversation(
         started_at=datetime.utcnow(),
     )
 
-    # Fix 9: use config.conversation_turns (cap at 8 to prevent runaway cost)
-    max_turns = min(getattr(config, "conversation_turns", _DEFAULT_MAX_TURNS) or _DEFAULT_MAX_TURNS, 8)
+    # Cap at 15 turns maximum to prevent runaway cost while still respecting
+    # user-configured values up to 15. Warn when config is overridden.
+    _MAX_TURNS_HARD_CAP = 15
+    configured_turns = getattr(config, "conversation_turns", _DEFAULT_MAX_TURNS) or _DEFAULT_MAX_TURNS
+    max_turns = min(configured_turns, _MAX_TURNS_HARD_CAP)
+    if configured_turns > _MAX_TURNS_HARD_CAP:
+        print(f"[ConversationRunner] conversation_turns={configured_turns} exceeds cap of {_MAX_TURNS_HARD_CAP}, using {_MAX_TURNS_HARD_CAP}")
 
     current_state = ConversationState.SEEKING
     current_message = prompt.text   # Start with the generated prompt
@@ -117,21 +141,23 @@ async def run_conversation(
     conv_id = conversation.conversation_id
 
     for turn_num in range(1, max_turns + 1):
-        # Send to adapter — retry once on 429 (target endpoint rate limit)
+        # Send to adapter — retry with exponential backoff on 429 (endpoint rate limit)
         resp: AdapterResponse = await adapter.send(current_message, conversation_id=conv_id)
         if resp.error and "429" in str(resp.error):
-            await asyncio.sleep(2)
-            resp = await adapter.send(current_message, conversation_id=conv_id)
+            for _retry_attempt in range(3):
+                _wait = 2 ** (_retry_attempt + 1)   # 2s, 4s, 8s
+                await asyncio.sleep(_wait)
+                resp = await adapter.send(current_message, conversation_id=conv_id)
+                if not (resp.error and "429" in str(resp.error)):
+                    break
         latency_ms = resp.latency_ms
 
-        # Detect error response — includes field-not-found and HTTP errors
+        # Detect error response — adapters route extraction/HTTP errors to resp.error,
+        # so not resp.ok and not resp.text cover all failure cases.
         is_error = (
             not resp.ok
             or not resp.text
             or resp.text.startswith("[Error")
-            or resp.text.startswith("[Field")
-            or resp.text.startswith("[Index")
-            or resp.text.startswith("[Empty")
         )
 
         # For SECURITY conversations, HTTP errors are meaningful results:
@@ -231,7 +257,7 @@ async def _combined_eval_generate(
         abandon_trigger=persona.behavioral_params.abandon_trigger,
         base_style=persona.language_model.base_style or "conversational",
         frustrated_style=persona.language_model.frustrated_style or "more direct",
-        response=ai_response[:1200],
+        response=_format_for_eval(ai_response)[:3000],
         history=history,
     )
 
@@ -260,9 +286,9 @@ async def _combined_eval_generate(
             next_msg = None
 
         return next_msg, new_state, response_type, goal_achieved
-    except Exception:
-        # Fallback: assume partial progress, keep going
-        return None, ConversationState.SATISFIED, ResponseType.VAGUE, False
+    except Exception as e:
+        print(f"[ConversationRunner] Persona turn eval failed for '{persona.name}' — ending conversation. Error: {e}")
+        return None, ConversationState.ABANDONED, ResponseType.VAGUE, False
 
 
 async def run_all_conversations(

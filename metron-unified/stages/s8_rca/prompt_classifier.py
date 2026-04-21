@@ -72,7 +72,10 @@ _METRIC_CATEGORIES: List[Tuple[str, List[str]]] = [
     ("",                    ["C1", "C2", "C4"]),
 ]
 
-_BATCH_SIZE = 5   # prompts per LLM call
+_BATCH_SIZE          = 5   # prompts per LLM call (default)
+_BATCH_SIZE_SECURITY = 2   # security prompts can be 2000+ chars — smaller batches prevent token overruns
+_QUERY_TRUNCATE      = 400 # default query/response character truncation per test case
+_QUERY_TRUNCATE_SEC  = 150 # tighter truncation for security (jailbreak) prompts
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -128,6 +131,7 @@ async def _classify_batch(
     taxonomy_entries: List[Dict[str, Any]],
     config: RunConfig,
     llm_client: LLMClient,
+    query_truncate: int = _QUERY_TRUNCATE,
 ) -> List[Dict[str, Any]]:
     """
     Classify a batch of failed prompts against the filtered taxonomy.
@@ -148,11 +152,11 @@ async def _classify_batch(
     for i, r in enumerate(batch):
         test_cases.append({
             "index": i,
-            "query": r.prompt[:600],
-            "response": r.response[:600],
+            "query": r.prompt[:query_truncate],
+            "response": r.response[:query_truncate],
             "metric_failed": r.metric_name,
             "score": round(r.score, 3),
-            "judge_reasoning": (r.reason or "")[:400],
+            "judge_reasoning": (r.reason or "")[:200],
         })
 
     system_prompt = (
@@ -187,6 +191,7 @@ async def _classify_batch(
             user_prompt,
             system=system_prompt,
             temperature=0.2,
+            max_tokens=1500,
             task="judge",
         )
         if isinstance(result, list):
@@ -244,10 +249,16 @@ async def classify_prompt_failures(
         taxonomy_entries = _filter_taxonomy(list(cats), config, extra_flags)
         if not taxonomy_entries:
             continue
-        # Split into BATCH_SIZE chunks
-        for i in range(0, len(group_results), _BATCH_SIZE):
-            batch = group_results[i : i + _BATCH_SIZE]
-            tasks.append(_classify_batch(batch, taxonomy_entries, config, llm_client))
+
+        # Security prompts (C4-only group) can be thousands of characters each.
+        # Use a tighter batch size and truncation to stay within token limits.
+        is_security_group = (cats == ("C4",))
+        batch_size    = _BATCH_SIZE_SECURITY if is_security_group else _BATCH_SIZE
+        query_trunc   = _QUERY_TRUNCATE_SEC  if is_security_group else _QUERY_TRUNCATE
+
+        for i in range(0, len(group_results), batch_size):
+            batch = group_results[i : i + batch_size]
+            tasks.append(_classify_batch(batch, taxonomy_entries, config, llm_client, query_trunc))
             batch_refs.append(batch)
 
     if not tasks:

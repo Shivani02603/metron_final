@@ -60,6 +60,14 @@ def make_deepeval_azure_model():
 
     endpoint   = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
     api_key    = os.environ.get("AZURE_OPENAI_API_KEY", "")
+
+    # Return None when Azure credentials are not configured — callers check
+    # `if deval_model is None:` to skip DeepEval metrics and show a warning.
+    # Without this guard, the model is created with empty credentials, the
+    # warning never fires, and every metric call fails with an auth error.
+    if not endpoint or not api_key:
+        return None
+
     api_version= os.environ.get("AZURE_API_VERSION", "2025-01-01-preview")
     deployment = _parse_deployment(endpoint)
     base_url   = _parse_base_url(endpoint)

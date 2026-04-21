@@ -29,19 +29,21 @@ def build_slots(profile: AppProfile, num_personas: int = 6) -> List[Dict[str, st
     user_types = profile.user_types or ["general user"]
     use_cases  = profile.use_cases  or ["general assistance"]
 
-    # Domain-specific slot counts
+    # Domain-specific slot counts — adversarial count is now proportional to
+    # num_personas so a small run (e.g. 3 personas) doesn't get flooded with
+    # adversarial slots regardless of domain.
     if domain in HIGH_SECURITY_DOMAINS:
-        adversarial_count = min(len(user_types), 4)
-        edge_case_count   = 3
-        emotional_count   = 2
+        adversarial_count = max(1, num_personas // 2)   # up to 50% adversarial
+        edge_case_count   = max(2, num_personas // 4)
+        emotional_count   = max(1, num_personas // 4)
     elif domain in HIGH_TRAFFIC_DOMAINS:
-        adversarial_count = min(2, len(user_types))
-        edge_case_count   = 2
-        emotional_count   = 4
+        adversarial_count = max(1, num_personas // 4)   # up to 25%
+        edge_case_count   = max(1, num_personas // 4)
+        emotional_count   = max(2, num_personas // 3)
     else:
-        adversarial_count = min(len(user_types), 3)
-        edge_case_count   = 2
-        emotional_count   = 3
+        adversarial_count = max(1, num_personas // 3)   # up to 33%
+        edge_case_count   = max(1, num_personas // 4)
+        emotional_count   = max(1, num_personas // 4)
 
     slots: List[Dict[str, str]] = []
 
@@ -87,11 +89,16 @@ def build_slots(profile: AppProfile, num_personas: int = 6) -> List[Dict[str, st
             "goal_type":     "security testing",
         })
 
-    # Group D: edge cases
+    # Group D: edge cases — expanded pool so different personas get different edge scenarios
     edge_types = [
-        ("novice", "wrong assumption about capabilities"),
-        ("expert", "edge case boundary testing"),
-        ("intermediate", "ambiguous or multi-part request"),
+        ("novice",        "wrong assumption about capabilities"),
+        ("expert",        "edge case boundary testing"),
+        ("intermediate",  "ambiguous or multi-part request"),
+        ("novice",        "incomplete or poorly phrased question"),
+        ("expert",        "request at the boundary of agent scope"),
+        ("intermediate",  "conflicting requirements in a single request"),
+        ("novice",        "question based on outdated information"),
+        ("expert",        "request requiring multi-step reasoning"),
     ]
     for i in range(min(edge_case_count, len(edge_types))):
         exp, goal = edge_types[i]

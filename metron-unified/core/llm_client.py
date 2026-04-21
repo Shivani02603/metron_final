@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import re
 import time
 from typing import Any, Optional
@@ -70,13 +71,21 @@ class LLMClient:
         data = await client.complete_json(prompt, system="...", retries=3)
     """
 
+    # How long (seconds) before a rate-exhausted model is retried.
+    _EXHAUSTION_COOLDOWN_S: float = 300.0   # 5 minutes
+
     def __init__(self, provider_name: str = "Groq", api_key: str = ""):
         self.provider_name = provider_name
         self.api_key = resolve_api_key(provider_name, api_key)
+        if provider_name not in LLM_PROVIDERS:
+            print(f"[LLMClient] WARNING: Unknown provider '{provider_name}', falling back to Groq. "
+                  f"Known providers: {list(LLM_PROVIDERS.keys())}")
         provider_info = LLM_PROVIDERS.get(provider_name, LLM_PROVIDERS["Groq"])
         self.rate_limiter = RateLimiter(provider_info.get("rpm", 30))
         self.optimize_tokens = should_optimize_tokens(provider_name)
-        self._exhausted: set[str] = set()   # models exhausted today
+        # Map model → exhausted_at timestamp (monotonic). Replaced the old set so
+        # exhaustion expires after _EXHAUSTION_COOLDOWN_S instead of lasting forever.
+        self._exhausted: dict[str, float] = {}
 
     # ── Public API ─────────────────────────────────────────────────────────
 
@@ -94,14 +103,32 @@ class LLMClient:
                                           "large" if len(prompt) > 2000 else "normal")
 
         primary_model = get_model(self.provider_name, task)
-        candidates = [primary_model] + [
-            m for m in FALLBACK_CHAIN if m != primary_model
+
+        # Build cross-provider fallback chain: static FALLBACK_CHAIN first,
+        # then one balanced model from each other configured provider whose
+        # API key is available in the environment.
+        static_fallbacks = [m for m in FALLBACK_CHAIN if m != primary_model]
+        cross_provider = []
+        for pname, pinfo in LLM_PROVIDERS.items():
+            if pname == self.provider_name:
+                continue
+            env_key = pinfo.get("env_key", "")
+            if env_key and os.environ.get(env_key):
+                cross_provider.append(pinfo["models"]["balanced"])
+        candidates = [primary_model] + static_fallbacks + [
+            m for m in cross_provider if m not in static_fallbacks and m != primary_model
         ]
 
+        now = time.monotonic()
         last_error: Exception = RuntimeError("No models available")
         for model in candidates:
-            if model in self._exhausted:
-                continue
+            # Check exhaustion with cooldown — expired entries are retried
+            exhausted_at = self._exhausted.get(model)
+            if exhausted_at is not None:
+                if now - exhausted_at < self._EXHAUSTION_COOLDOWN_S:
+                    continue
+                del self._exhausted[model]   # cooldown expired — allow retry
+
             for attempt in range(3):
                 try:
                     await self.rate_limiter.wait()
@@ -111,10 +138,11 @@ class LLMClient:
                     last_error = e
                     msg = str(e).lower()
                     if "quota" in msg or "resource_exhausted" in msg or "generaterequeststsperday" in msg.replace(" ", ""):
-                        self._exhausted.add(model)
+                        self._exhausted[model] = time.monotonic()
                         break   # skip retries, try next model
                     wait = self._parse_retry_after(str(e))
-                    await asyncio.sleep(min(wait, 60) + 2)
+                    # Add jitter so concurrent callers don't all retry at the same moment
+                    await asyncio.sleep(min(wait, 60) + random.uniform(0.5, 2.5))
                 except (litellm.exceptions.APIError,
                         litellm.exceptions.ServiceUnavailableError,
                         litellm.exceptions.NotFoundError) as e:
@@ -123,13 +151,14 @@ class LLMClient:
                 except litellm.exceptions.BadRequestError as e:
                     msg = str(e).lower()
                     if any(k in msg for k in ("429", "quota", "resource_exhausted")):
-                        self._exhausted.add(model)
+                        self._exhausted[model] = time.monotonic()
                         break
                     raise   # real bad request — propagate
                 except Exception as e:
                     last_error = e
                     if attempt < 2:
-                        await asyncio.sleep(2 ** attempt)
+                        # Jitter prevents thundering herd on transient failures
+                        await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
                     else:
                         break
 

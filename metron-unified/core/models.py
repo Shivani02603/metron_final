@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 import uuid
 
 
@@ -104,6 +104,27 @@ class RunConfig(BaseModel):
     rag_text:     str  = ""
     ground_truth: List[Dict] = []   # [{"question": ..., "expected_answer": ..., "context": str|list}]
 
+    @field_validator("ground_truth", mode="before")
+    @classmethod
+    def _validate_ground_truth(cls, v):
+        """
+        Validate ground_truth entries have the required 'question' key.
+        Entries missing 'question' are dropped with a warning rather than
+        crashing mid-pipeline with a cryptic KeyError.
+        """
+        if not isinstance(v, list):
+            return []
+        valid = []
+        for i, entry in enumerate(v):
+            if not isinstance(entry, dict):
+                print(f"[RunConfig] ground_truth[{i}] is not a dict — skipped")
+                continue
+            if not entry.get("question", "").strip():
+                print(f"[RunConfig] ground_truth[{i}] missing 'question' field — skipped")
+                continue
+            valid.append(entry)
+        return valid
+
     # Test parameters
     num_personas:           int  = 3
     num_scenarios:          int  = 5
@@ -122,12 +143,17 @@ class RunConfig(BaseModel):
     attacks_per_category:  int = 3
 
     # Quality
-    ragas_metrics:   List[str] = ["faithfulness", "answer_relevancy"]
-    deepeval_metrics: List[str] = ["hallucination", "toxicity"]
-    use_geval:       bool = True
+    # deepeval_metrics controls which DeepEval metrics run in functional evaluation:
+    #   "hallucination"    — HallucinationMetric (requires context or expected_behavior)
+    #   "answer_relevancy" — AnswerRelevancyMetric
+    # Note: toxicity is evaluated separately in security.py via Detoxify (always on).
+    ragas_metrics:    List[str] = ["faithfulness", "answer_relevancy"]
+    deepeval_metrics: List[str] = ["hallucination", "answer_relevancy"]
+    use_geval:        bool = True
 
-    # Feedback loop
-    enable_feedback_loop: bool = True
+    # Adapter timeout — how long to wait for the target endpoint before giving up.
+    # Increase for slow LLM inference backends (e.g. self-hosted models).
+    adapter_timeout: int = 60   # seconds
 
     # ── Advanced request/response templating ──────────────────────────────
     # Set request_template to a full JSON body string with placeholders:
@@ -200,9 +226,8 @@ class Persona(BaseModel):
     behavioral_params: BehavioralParameters = Field(default_factory=BehavioralParameters)
     traits:           List[str] = []         # for existing UI persona cards
     sample_prompts:   List[str] = []         # for existing UI persona cards (= entry_points)
-    entry_points:     List[str] = []
-    initial_state:    ConversationState = ConversationState.SEEKING
-    max_turns:        int = 8
+    entry_points:        List[str] = []
+    initial_state:       ConversationState = ConversationState.SEEKING
     fishbone_dimensions: Dict[str, str] = {}
 
 

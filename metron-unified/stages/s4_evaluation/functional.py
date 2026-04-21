@@ -96,6 +96,41 @@ _DEFAULT_CRITERIA_TEXT = (
 )
 
 
+# ── Expected-behavior reference quality check ─────────────────────────────────
+
+# Keywords that signal a behavioral/prescriptive description rather than a factual document.
+# If 3+ of these appear in expected_behavior it is directive text, not a reference corpus.
+_BEHAVIORAL_DIRECTIVE_KEYWORDS = frozenset({
+    "should", "must", "expected to", "required to", "needs to",
+    "ought to", "is designed to", "the agent", "the bot", "the assistant",
+    "respond with", "respond by", "is supposed to",
+})
+
+
+def _is_factual_reference(text: str) -> bool:
+    """
+    Return True only when expected_behavior is a factual reference document
+    suitable as a hallucination ground-truth (contains specific verifiable
+    information), not a behavioral description that says what the agent ought to do.
+
+    Behavioral descriptions ("The assistant should respond professionally…")
+    cause false hallucination failures when used as DeepEval reference context
+    because any on-topic answer will diverge from the prescriptive wording.
+    """
+    if not text or len(text) < 100:
+        return False
+    text_lower = text.lower()
+    directive_hits = sum(1 for kw in _BEHAVIORAL_DIRECTIVE_KEYWORDS if kw in text_lower)
+    # 2+ directive keywords → predominantly a behavioral description → not a reference.
+    # Lowered from 3 to 2: a single "should" + "the assistant" is already enough to
+    # identify prescriptive text; using it as a hallucination reference produces false
+    # failures because any valid response will diverge from the prescriptive wording.
+    if directive_hits >= 2:
+        return False
+    # Must still be long enough to contain meaningful factual content
+    return len(text) >= 200
+
+
 def _configure_deepeval(llm_provider: str, llm_api_key: str) -> None:
     """Ensure Azure env vars are set so the AzureOpenAI client resolves correctly."""
     try:
@@ -178,7 +213,8 @@ def _deepeval_hallucination(
 ) -> tuple[float, str]:
     """
     DeepEval HallucinationMetric.
-    score = 1.0 - raw_hallucination_score  (1.0 = no hallucination).
+    raw score: 0.0 = no hallucination, 1.0 = fully hallucinated.
+    stored score: inverted so 1.0 = clean, 0.0 = hallucinated (higher = better).
     Raises on any error — caller records a skipped MetricResult.
     """
     from deepeval.metrics import HallucinationMetric
@@ -187,8 +223,12 @@ def _deepeval_hallucination(
     metric = HallucinationMetric(threshold=0.5, model=model)
     test_case = LLMTestCase(input=query, actual_output=response, context=context[:3])
     metric.measure(test_case)
-    score = round(1.0 - float(metric.score), 4)
-    return score, f"DeepEval HallucinationMetric: {score:.3f}"
+    raw = metric.score
+    if raw is None:
+        raise ValueError("HallucinationMetric returned None score")
+    # Invert: low raw score (no hallucination) → high stored score (PASS)
+    score = round(1.0 - float(raw), 4)
+    return score, f"DeepEval HallucinationMetric: {score:.3f} (raw hallucination rate: {float(raw):.3f})"
 
 
 def _deepeval_answer_relevancy(query: str, response: str, model) -> tuple[float, str]:
@@ -279,8 +319,8 @@ async def _llm_judge(
     """
     prompt = LLM_JUDGE_PROMPT.format(
         question=question[:400],
-        response=response[:1200],
-        expected=expected[:300] if expected else "A helpful, accurate response",
+        response=response[:3000],
+        expected=expected[:400] if expected else "A helpful, accurate response",
         criteria_text=criteria_text,
     )
     try:
@@ -300,7 +340,7 @@ async def _llm_judge(
         result.setdefault("reasoning", "")
         return result
     except Exception:
-        return {"overall": 0.5, "reasoning": "Judge unavailable"}
+        raise
 
 
 async def _llm_completeness(
@@ -312,8 +352,8 @@ async def _llm_completeness(
     """LLM-based completeness + semantic similarity vs expected_behavior."""
     prompt = COMPLETENESS_PROMPT.format(
         question=question[:400],
-        response=response[:600],
-        expected=expected[:400],
+        response=response[:2000],
+        expected=expected[:600],
     )
     try:
         data = await llm_client.complete_json(
@@ -325,7 +365,7 @@ async def _llm_completeness(
             "reasoning": str(data.get("reasoning", "")),
         }
     except Exception:
-        return {"completeness": 0.5, "answer_similarity": 0.5, "reasoning": "Completeness check unavailable"}
+        raise
 
 
 async def _cross_turn_consistency(
@@ -358,7 +398,7 @@ async def _cross_turn_consistency(
         reasoning = str(data.get("reasoning", "") or "No reasoning returned by judge")
         return score, reasoning, turns_text
     except Exception as e:
-        return None
+        raise
 
 
 # ── Main evaluator ────────────────────────────────────────────────────────────
@@ -384,6 +424,10 @@ async def evaluate_functional(
 
     _configure_deepeval(config.llm_provider, config.llm_api_key)
     deval_model = make_deepeval_azure_model()
+    if deval_model is None:
+        print("[FunctionalEval] WARNING: Azure OpenAI not configured — DeepEval metrics "
+              "(hallucination, answer_relevancy, usefulness) will be skipped. "
+              "Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY to enable them.")
 
     # Fix 3: always default criteria only (no domain criteria from quality_criteria)
     criteria_text  = _DEFAULT_CRITERIA_TEXT
@@ -470,8 +514,8 @@ async def evaluate_functional(
                             skip_reason=f"DeepEval error: {str(e)[:120]}",
                         ))
 
-                elif expected and len(expected) >= 200:
-                    # Branch 2: substantial expected_behavior → valid reference document
+                elif expected and _is_factual_reference(expected):
+                    # Branch 2: factual reference document (not a behavioral description)
                     try:
                         hall_score, hall_reason = await loop.run_in_executor(
                             None, _deepeval_hallucination, query, response, [expected], deval_model,
@@ -493,9 +537,10 @@ async def evaluate_functional(
 
                 else:
                     # Branch 3: no usable reference → GEval factual accuracy fallback
-                    # Detects domain-level factual errors using LLM judge's training knowledge.
-                    # Short expected_behavior (<200 chars) is a behavioral description, not a
-                    # knowledge document — using it as a hallucination reference produces false 0.0s.
+                    # Detects domain-level factual errors using the LLM judge's domain knowledge.
+                    # Behavioral descriptions (contain directive language like "should", "must")
+                    # are not knowledge documents — using them as hallucination references
+                    # produces false failures because any valid response diverges from the wording.
                     try:
                         fact_score, fact_reason = await loop.run_in_executor(
                             None, _deepeval_geval_factual_accuracy, query, response, domain, deval_model,
@@ -583,24 +628,34 @@ async def evaluate_functional(
                 turn_number=last_turn.turn_number,
             )
             async with sem:
-                judge_result = await _llm_judge(
-                    last_turn.query, last_turn.response,
-                    last_turn.expected_behavior or "",
-                    llm_client, criteria_text,
-                )
-            reasoning = judge_result.get("reasoning", "")
-            skip_keys = {"overall", "reasoning"}
-            for crit_key, crit_score in judge_result.items():
-                if crit_key in skip_keys:
-                    continue
                 try:
-                    s = float(crit_score)
-                except (TypeError, ValueError):
-                    continue
-                local.append(MetricResult(
-                    **base_last, metric_name=f"llm_{crit_key}", score=s,
-                    passed=s >= pass_threshold, reason=reasoning,
-                ))
+                    judge_result = await _llm_judge(
+                        last_turn.query, last_turn.response,
+                        last_turn.expected_behavior or "",
+                        llm_client, criteria_text,
+                    )
+                except Exception as e:
+                    local.append(MetricResult(
+                        **base_last, metric_name="llm_judge",
+                        score=0.0, passed=False, reason="",
+                        skipped=True,
+                        skip_reason=f"LLM judge unavailable: {str(e)[:120]}",
+                    ))
+                    judge_result = None
+            if judge_result is not None:
+                reasoning = judge_result.get("reasoning", "")
+                skip_keys = {"overall", "reasoning"}
+                for crit_key, crit_score in judge_result.items():
+                    if crit_key in skip_keys:
+                        continue
+                    try:
+                        s = float(crit_score)
+                    except (TypeError, ValueError):
+                        continue
+                    local.append(MetricResult(
+                        **base_last, metric_name=f"llm_{crit_key}", score=s,
+                        passed=s >= pass_threshold, reason=reasoning,
+                    ))
 
         # ── Completeness + Answer Similarity (Fix 11) ────────────────────────
         # Only for non-RAG conversations where expected_behavior is available.
@@ -624,26 +679,56 @@ async def evaluate_functional(
                 turn_number=last_turn.turn_number,
             )
             async with sem:
-                comp_result = await _llm_completeness(
-                    last_turn.query, last_turn.response, last_expected, llm_client,
-                )
-            comp_reason = comp_result.get("reasoning", "")
-            for metric_key in ("completeness", "answer_similarity"):
-                score = comp_result.get(metric_key, 0.5)
-                local.append(MetricResult(
-                    **base_last,
-                    metric_name=f"llm_{metric_key}",
-                    score=round(score, 4),
-                    passed=score >= pass_threshold,
-                    reason=comp_reason,
-                ))
+                try:
+                    comp_result = await _llm_completeness(
+                        last_turn.query, last_turn.response, last_expected, llm_client,
+                    )
+                except Exception as e:
+                    for metric_key in ("completeness", "answer_similarity"):
+                        local.append(MetricResult(
+                            **base_last,
+                            metric_name=f"llm_{metric_key}",
+                            score=0.0, passed=False, reason="",
+                            skipped=True,
+                            skip_reason=f"Completeness check unavailable: {str(e)[:120]}",
+                        ))
+                    comp_result = None
+            if comp_result is not None:
+                comp_reason = comp_result.get("reasoning", "")
+                for metric_key in ("completeness", "answer_similarity"):
+                    score = comp_result.get(metric_key, 0.5)
+                    local.append(MetricResult(
+                        **base_last,
+                        metric_name=f"llm_{metric_key}",
+                        score=round(score, 4),
+                        passed=score >= pass_threshold,
+                        reason=comp_reason,
+                    ))
 
         # ── Cross-turn consistency (Fix 10 + Fix 6) ──────────────────────────
         # Fix 6: stores full transcript in prompt, judge reasoning in response
         # so every row is verifiable (no more "[multi-turn: N turns]" placeholder).
         if run_judge and len(conv.turns) >= 2:
             async with sem:
-                ct_result = await _cross_turn_consistency(conv, llm_client)
+                try:
+                    ct_result = await _cross_turn_consistency(conv, llm_client)
+                except Exception as e:
+                    local.append(MetricResult(
+                        conversation_id=conv.conversation_id,
+                        persona_id=conv.persona_id,
+                        persona_name=conv.persona_name,
+                        intent=intent,
+                        fishbone=fishbone,
+                        prompt=f"[multi-turn: {len(conv.turns)} turns]",
+                        response="",
+                        latency_ms=conv.total_latency_ms,
+                        superset="functional",
+                        metric_name="cross_turn_consistency",
+                        score=0.0, passed=False, reason="",
+                        skipped=True,
+                        skip_reason=f"Consistency check unavailable: {str(e)[:120]}",
+                    ))
+                    ct_result = None
             if ct_result is not None:
                 consistency, ct_reasoning, turns_text = ct_result
                 local.append(MetricResult(

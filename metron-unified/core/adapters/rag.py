@@ -83,6 +83,8 @@ class RAGAdapter:
                     data = await resp.json(content_type=None)
                     text = self._trim_response(self._extract_text(data))
                     context = self._extract_context(data)
+                    if text.startswith(("[Field ", "[Index ", "[Empty")):
+                        return AdapterResponse("", latency, error=text, retrieved_context=context)
                     return AdapterResponse(text, latency, retrieved_context=context)
         except Exception as e:
             latency = (time.monotonic() - start) * 1000
@@ -94,9 +96,14 @@ class RAGAdapter:
         for p in parts:
             if isinstance(result, dict) and p in result:
                 result = result[p]
+            elif isinstance(result, list) and p.isdigit():
+                idx = int(p)
+                result = result[idx] if 0 <= idx < len(result) else None
+                if result is None:
+                    return f"[Index '{p}' out of bounds]"
             else:
-                return "[Response field not found]"
-        return str(result) if result else "[Empty]"
+                return f"[Field '{p}' not found]"
+        return str(result) if result else "[Empty response]"
 
     def _extract_context(self, data: Dict[str, Any]) -> Optional[List[str]]:
         if self.context_field and self.context_field in data:

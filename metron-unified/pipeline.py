@@ -10,6 +10,16 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+# Per-run locks prevent concurrent pipeline stages from overwriting each other's
+# job_store state when multiple runs execute simultaneously.
+_job_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _get_lock(run_id: str) -> asyncio.Lock:
+    if run_id not in _job_locks:
+        _job_locks[run_id] = asyncio.Lock()
+    return _job_locks[run_id]
+
 from core.llm_client import LLMClient
 from core.models import (
     AppProfile, AggregatedReport, ApplicationType, Conversation, GeneratedPrompt,
@@ -50,12 +60,12 @@ def _log(job_store: Dict, run_id: str, event_type: str, content: Dict):
     })
 
 
-def _update(job_store: Dict, run_id: str, progress: int, message: str, phase: str = "", phase_data: Dict = {}):
+def _update(job_store: Dict, run_id: str, progress: int, message: str, phase: str = "", phase_data: Optional[Dict] = None):
     if run_id in job_store:
         job_store[run_id]["progress"]      = progress
         job_store[run_id]["message"]       = message
         job_store[run_id]["current_phase"] = phase
-        if phase_data:
+        if phase_data is not None:
             job_store[run_id]["phase_results"][phase] = phase_data
 
 
@@ -182,13 +192,11 @@ async def run_pipeline(
         _log(job_store, run_id, "phase_start", {"phase": "execution", "label": "Running Conversations"})
 
         # Progress callback for live updates — emits conversation feed events
-        completed_convs: List[Conversation] = []
         def on_conv(done: int, total: int, conv: Conversation):
             progress = 28 + int((done / total) * 30)   # 28-58%
             phase = conv.test_class.value
             _update(job_store, run_id, progress,
                     f"Executing {phase} test {done}/{total}…", "execution")
-            completed_convs.append(conv)
             # Emit every conversation so user sees live Q&A
             last_turn = conv.turns[-1] if conv.turns else None
             _log(job_store, run_id, "conversation", {
@@ -342,7 +350,13 @@ async def run_pipeline(
             _update(job_store, run_id, 96, f"RCA: {len(rca_report.top_causes)} root causes identified", "rca",
                     {"top_cause": rca_report.top_causes[0].label if rca_report.top_causes else "none"})
         except Exception as rca_err:
-            print(f"[Pipeline] RCA failed (non-fatal): {rca_err}")
+            import traceback as _tb
+            _rca_tb = _tb.format_exc()
+            print(f"[Pipeline] RCA failed (non-fatal):\n{_rca_tb}")
+            _log(job_store, run_id, "rca_warning", {
+                "message": f"Root cause analysis could not complete: {str(rca_err)[:200]}",
+                "detail": _rca_tb[-600:],
+            })
 
         # ── Per-prompt failure classification ──────────────────────────────
         _update(job_store, run_id, 96, "Classifying per-prompt failure reasons…", "rca")
@@ -370,7 +384,13 @@ async def run_pipeline(
                     entry["failure_taxonomy_label"] = matched.failure_taxonomy_label
                     entry["failure_reason"]         = matched.failure_reason
         except Exception as clf_err:
-            print(f"[Pipeline] Per-prompt classifier failed (non-fatal): {clf_err}")
+            import traceback as _tb2
+            _clf_tb = _tb2.format_exc()
+            print(f"[Pipeline] Per-prompt classifier failed (non-fatal):\n{_clf_tb}")
+            _log(job_store, run_id, "classifier_warning", {
+                "message": f"Per-prompt failure classification could not complete: {str(clf_err)[:200]}",
+                "detail": _clf_tb[-600:],
+            })
 
         # ── Stage 7: Report Generation ─────────────────────────────────────
         _update(job_store, run_id, 97, "Generating report…", "report")
@@ -492,6 +512,7 @@ async def run_pipeline(
         job_store[run_id]["progress"] = 100
         job_store[run_id]["message"]  = f"Completed! Health score: {report.health_score:.0%}"
         job_store[run_id]["results"]  = final_json
+        _job_locks.pop(run_id, None)   # release lock for completed run
 
         # Fix 28: persist completed run to SQLite for history / regression endpoints
         try:
@@ -513,3 +534,4 @@ async def run_pipeline(
         job_store[run_id]["error"]  = str(e)
         job_store[run_id]["message"] = f"Pipeline failed: {str(e)[:200]}"
         print(f"[Pipeline ERROR] {run_id}: {traceback.format_exc()}")
+        _job_locks.pop(run_id, None)   # release lock on failure too

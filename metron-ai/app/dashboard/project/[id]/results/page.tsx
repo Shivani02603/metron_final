@@ -206,6 +206,7 @@ export default function ResultsPage() {
       "Suite", "Metric / Test", "Category",
       "Prompt (Input)", "AI Response (Output)",
       "Score", "Passed", "Reasoning", "Latency (ms)",
+      "Taxonomy ID", "Taxonomy Label", "Failure Reason",
     ];
 
     const toRows = (suite: string, items: TestResult[] = []) =>
@@ -219,6 +220,9 @@ export default function ResultsPage() {
         r.passed ? "PASS" : "FAIL",
         escape(r.reasoning || ""),
         r.latency_ms?.toFixed(0) ?? "",
+        escape(r.failure_taxonomy_id || ""),
+        escape(r.failure_taxonomy_label || ""),
+        escape(r.failure_reason || ""),
       ]);
 
     const rows = [
@@ -237,13 +241,17 @@ export default function ResultsPage() {
 
   const downloadCSV = () => {
     if (!results?.functional?.results) return;
-    const headers = ["Test ID", "Name", "Category", "Score", "Passed", "Latency(ms)", "Input", "Output"];
+    const headers = ["Test ID", "Name", "Category", "Score", "Passed", "Latency(ms)", "Input", "Output", "Taxonomy ID", "Taxonomy Label", "Failure Reason"];
+    const escape = (s: string) => `"${String(s ?? "").replace(/"/g, '""')}"`;
     const rows = results.functional.results.map((r) => [
       r.test_id, r.test_name, r.category,
       r.score.toFixed(3), r.passed ? "true" : "false",
       r.latency_ms.toFixed(0),
-      `"${r.input_text.slice(0, 100).replace(/"/g, '""')}"`,
-      `"${r.output_text.slice(0, 200).replace(/"/g, '""')}"`,
+      escape(r.input_text.slice(0, 100)),
+      escape(r.output_text.slice(0, 200)),
+      escape(r.failure_taxonomy_id || ""),
+      escape(r.failure_taxonomy_label || ""),
+      escape(r.failure_reason || ""),
     ]);
     const csv = [headers, ...rows].map((r) => r.join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });

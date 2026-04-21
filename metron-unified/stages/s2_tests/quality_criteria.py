@@ -132,8 +132,9 @@ async def generate_quality_criteria(
         )
         if data and data.get("criteria"):
             return data
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[QualityCriteria] LLM criteria generation failed for domain '{profile.domain}' "
+              f"— falling back to domain preset or defaults. Error: {e}")
 
     # Final fallback: check domain fallback again, else default
     return DOMAIN_CRITERIA_FALLBACKS.get(domain, DEFAULT_CRITERIA)
@@ -167,7 +168,7 @@ def filter_criteria_for_question(criteria: dict, question: str) -> dict:
 
     filtered = [
         c for c in criteria.get("criteria", [])
-        if not _should_skip_criterion(question, c.get("description", ""))
+        if not _should_skip_criterion(question, c.get("description", ""), c.get("name", ""))
     ]
     if not filtered:
         return criteria   # if all would be filtered, return original (safety net)

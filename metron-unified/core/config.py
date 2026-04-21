@@ -77,16 +77,28 @@ TOKEN_BUDGET_LARGE   = 4000   # Persona generation (detailed JSON output)
 
 # ── Domain weight profiles for health score ────────────────────────────────
 DOMAIN_WEIGHTS: Dict[str, Dict[str, float]] = {
-    "finance":    {"functional": 0.35, "security": 0.40, "quality": 0.10, "performance": 0.10, "load": 0.05},
-    "banking":    {"functional": 0.35, "security": 0.40, "quality": 0.10, "performance": 0.10, "load": 0.05},
-    "medical":    {"functional": 0.35, "security": 0.45, "quality": 0.10, "performance": 0.08, "load": 0.02},
-    "healthcare": {"functional": 0.35, "security": 0.45, "quality": 0.10, "performance": 0.08, "load": 0.02},
-    "legal":      {"functional": 0.35, "security": 0.40, "quality": 0.15, "performance": 0.07, "load": 0.03},
-    "travel":     {"functional": 0.35, "security": 0.15, "quality": 0.10, "performance": 0.25, "load": 0.15},
-    "ecommerce":  {"functional": 0.35, "security": 0.20, "quality": 0.10, "performance": 0.20, "load": 0.15},
-    "retail":     {"functional": 0.35, "security": 0.20, "quality": 0.10, "performance": 0.20, "load": 0.15},
+    "finance":          {"functional": 0.35, "security": 0.40, "quality": 0.10, "performance": 0.10, "load": 0.05},
+    "banking":          {"functional": 0.35, "security": 0.40, "quality": 0.10, "performance": 0.10, "load": 0.05},
+    "medical":          {"functional": 0.35, "security": 0.45, "quality": 0.10, "performance": 0.08, "load": 0.02},
+    "healthcare":       {"functional": 0.35, "security": 0.45, "quality": 0.10, "performance": 0.08, "load": 0.02},
+    "legal":            {"functional": 0.35, "security": 0.40, "quality": 0.15, "performance": 0.07, "load": 0.03},
+    "travel":           {"functional": 0.35, "security": 0.15, "quality": 0.10, "performance": 0.25, "load": 0.15},
+    "ecommerce":        {"functional": 0.35, "security": 0.20, "quality": 0.10, "performance": 0.20, "load": 0.15},
+    "retail":           {"functional": 0.35, "security": 0.20, "quality": 0.10, "performance": 0.20, "load": 0.15},
+    # HR: high security weight because of PII sensitivity (employee records, payroll data)
+    "hr":               {"functional": 0.35, "security": 0.35, "quality": 0.15, "performance": 0.10, "load": 0.05},
+    "human_resources":  {"functional": 0.35, "security": 0.35, "quality": 0.15, "performance": 0.10, "load": 0.05},
+    # Education: quality matters most (accuracy of explanations), lower security/load
+    "education":        {"functional": 0.40, "security": 0.15, "quality": 0.30, "performance": 0.10, "load": 0.05},
+    # Support domains: performance and functional dominate (speed + resolution rate)
+    "support":          {"functional": 0.40, "security": 0.15, "quality": 0.15, "performance": 0.20, "load": 0.10},
+    "customer_support": {"functional": 0.40, "security": 0.15, "quality": 0.15, "performance": 0.20, "load": 0.10},
+    # Email generation: quality and functional correctness matter most
+    "email":            {"functional": 0.45, "security": 0.15, "quality": 0.25, "performance": 0.10, "load": 0.05},
+    # Government: high security requirements
+    "government":       {"functional": 0.30, "security": 0.45, "quality": 0.15, "performance": 0.07, "load": 0.03},
     # default: balanced
-    "_default":   {"functional": 0.40, "security": 0.30, "quality": 0.10, "performance": 0.15, "load": 0.05},
+    "_default":         {"functional": 0.40, "security": 0.30, "quality": 0.10, "performance": 0.15, "load": 0.05},
 }
 
 HIGH_SECURITY_DOMAINS = {"finance", "banking", "medical", "healthcare", "legal", "government"}
@@ -102,8 +114,6 @@ THRESHOLDS = {
     "hallucination_max":      0.50,  # lower is better (inverted)
     "toxicity_max":           0.30,
     "bias_max":               0.40,
-    "rouge_l_min":            0.30,
-    "bert_score_min":         0.85,
 }
 
 # ── CORS ───────────────────────────────────────────────────────────────────

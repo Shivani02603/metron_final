@@ -21,7 +21,10 @@ LLM metrics are additive — failure does not suppress non-LLM results.
 
 from __future__ import annotations
 import asyncio
+import math
 import os
+
+_RAGAS_PASS_THRESHOLD = 0.5   # minimum score for a RAGAS metric to be considered passing
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.models import (
@@ -333,7 +336,6 @@ async def evaluate_rag(
                 if col not in df.columns:
                     continue
                 raw_score = row[col]
-                import math
                 score = float(raw_score) if (raw_score == raw_score and not (isinstance(raw_score, float) and math.isnan(raw_score))) else 0.0
                 reason = f"RAGAS {col}: {score:.3f}"
                 if missing_ctx:
@@ -342,7 +344,7 @@ async def evaluate_rag(
                     **base,
                     metric_name=metric_name,
                     score=round(score, 4),
-                    passed=score >= 0.5,
+                    passed=score >= _RAGAS_PASS_THRESHOLD,
                     reason=reason,
                 ))
     else:

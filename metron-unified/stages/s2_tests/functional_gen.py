@@ -103,7 +103,9 @@ async def generate_functional_prompts(
     rag_section = ""
     rag_rules = ""
     if rag_text and rag_text.strip():
-        snippet = rag_text.strip()[:800]
+        # Increased from 800 to 3000 chars so test cases are grounded in a
+        # representative portion of the knowledge base, not just the opening lines.
+        snippet = rag_text.strip()[:3000]
         rag_section = f"- Knowledge Base (excerpt):\n{snippet}\n"
         rag_rules = "- The expected_behavior MUST be based on the actual content in the knowledge base above\n- Do NOT hallucinate facts — only reference what is in the knowledge base\n"
 
@@ -139,8 +141,9 @@ async def generate_functional_prompts(
                 expected_behavior=p.get("expected_behavior", ""),
                 turn_number=p.get("turn", 1),
             ))
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[FunctionalGen] LLM prompt generation failed for persona '{persona.name}' "
+              f"(domain: {profile.domain}) — falling back to entry_points. Error: {e}")
 
     # Fallback: use persona's entry_points
     if not generated:
@@ -181,7 +184,8 @@ async def generate_performance_prompts(
                 text=p["text"],
                 expected_behavior=p.get("expected_behavior", ""),
             ))
-    except Exception:
+    except Exception as e:
+        print(f"[FunctionalGen] Performance prompt generation failed for persona '{persona.name}' — using entry_point. Error: {e}")
         if persona.entry_points:
             generated.append(GeneratedPrompt(
                 persona_id=persona.persona_id,

@@ -118,8 +118,8 @@ async def build_persona(
             task="balanced",
             retries=3,
         )
-    except Exception:
-        # Fallback: minimal persona from slot dimensions
+    except Exception as e:
+        print(f"[PersonaBuilder] LLM persona generation failed for slot '{slot.get('user_type', slot)}' — using fallback. Error: {e}")
         return _fallback_persona(slot, profile, project_id)
 
     bp_raw = data.get("behavioral_params", {})
@@ -150,8 +150,9 @@ async def build_persona(
         domain_knowledge=data.get("domain_knowledge", ""),
         traits=data.get("traits", [])[:5],
         behavioral_params=BehavioralParameters(
-            patience_level=int(bp_raw.get("patience_level", 3)),
-            persistence=int(bp_raw.get("persistence", 3)),
+            # Clamp to valid ranges — LLM may return out-of-range values (0, 11, etc.)
+            patience_level=max(1, min(5, int(bp_raw.get("patience_level", 3)))),
+            persistence=max(1, min(10, int(bp_raw.get("persistence", 5)))),
             rephrase_strategy=bp_raw.get("rephrase_strategy", "simpler_words"),
             escalation_trigger=bp_raw.get("escalation_trigger", "After 2 unhelpful responses"),
             abandon_trigger=bp_raw.get("abandon_trigger", "After 4 failed attempts"),

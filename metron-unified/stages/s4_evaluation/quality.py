@@ -30,6 +30,29 @@ from core.config import THRESHOLDS
 from core.deepeval_azure import make_deepeval_azure_model
 
 
+# ── Escalation criterion filter ───────────────────────────────────────────────
+
+_ESCALATION_KEYWORDS = frozenset({
+    "escalat", "hand off", "handoff", "transfer to human", "human agent",
+    "live agent", "escalation appropriateness",
+})
+_SUPPORT_DOMAINS = frozenset({
+    "support", "customer_support", "helpdesk", "help_desk", "triage",
+    "service_desk", "contact_center",
+})
+
+
+def _is_escalation_criterion(name: str, description: str) -> bool:
+    text = (name + " " + description).lower()
+    return any(kw in text for kw in _ESCALATION_KEYWORDS)
+
+
+def _is_support_agent(config) -> bool:
+    domain   = (getattr(config, "agent_domain",      "") or "").lower()
+    app_type = (getattr(config, "application_type",  "") or "").lower()
+    return any(kw in domain or kw in app_type for kw in _SUPPORT_DOMAINS)
+
+
 # ── Factual question detector (Fix 2) ────────────────────────────────────────
 
 # Policy/procedure criterion keywords — criteria whose descriptions contain these
@@ -46,10 +69,31 @@ _FACTUAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Pattern that identifies genuine support/complaint requests where escalation
+# criteria are meaningful (issues, errors, complaints, explicit escalation requests).
+_SUPPORT_REQUEST_PATTERN = re.compile(
+    r"\b(issue|problem|error|broken|not working|crash(?:ing)?|fail(?:ing|ed)?|"
+    r"complaint|escalate|escalation|transfer|speak to|talk to|human agent|"
+    r"live agent|manager|supervisor|refund|cancel(?:lation)?|support ticket|"
+    r"case number|unresolved|ticket|incident)\b",
+    re.IGNORECASE,
+)
+
 
 def _is_factual_question(text: str) -> bool:
     """Return True when the query looks like a short factual/identity question."""
     return bool(_FACTUAL_PATTERN.match(text.strip()))
+
+
+def _is_support_request_query(text: str) -> bool:
+    """
+    Return True when the query contains language typical of a genuine support or
+    complaint scenario (errors, issues, escalation requests, cancellations, etc.).
+    Used to gate escalation-appropriateness criteria: those criteria only make
+    sense when the user is actually experiencing a problem, not when they are
+    asking for drafting help or other non-support tasks.
+    """
+    return bool(_SUPPORT_REQUEST_PATTERN.search(text.strip()))
 
 
 def _criterion_is_policy_type(description: str) -> bool:
@@ -58,13 +102,28 @@ def _criterion_is_policy_type(description: str) -> bool:
     return any(kw in desc_lower for kw in _POLICY_KEYWORDS)
 
 
-def _should_skip_criterion(query: str, criterion_description: str) -> bool:
+def _should_skip_criterion(query: str, criterion_description: str, criterion_name: str = "") -> bool:
     """
     Fix 2: Skip a domain criterion for this conversation if the question is
     purely factual AND the criterion is policy/procedure-oriented.
     These combinations reliably produce false 0.0 scores.
+
+    Also skips escalation-appropriateness criteria when the query does not
+    contain language indicative of a support or complaint scenario.  Escalation
+    criteria are only meaningful when a user is reporting an issue or requesting
+    human intervention; applying them to e.g. email-drafting or FAQ queries
+    produces consistently low scores that do not reflect a real deficiency.
     """
-    return _is_factual_question(query) and _criterion_is_policy_type(criterion_description)
+    # Policy-type criterion on a pure factual question
+    if _is_factual_question(query) and _criterion_is_policy_type(criterion_description):
+        return True
+    # Escalation criterion on a non-support query
+    if (
+        _is_escalation_criterion(criterion_name, criterion_description)
+        and not _is_support_request_query(query)
+    ):
+        return True
+    return False
 
 
 # ── DeepEval GEval ────────────────────────────────────────────────────────────
@@ -86,12 +145,13 @@ def _run_deepeval_geval(
     from deepeval.test_case import LLMTestCase, LLMTestCaseParams
 
     scores: dict[str, float] = {}
-    for criterion in criteria[:6]:
+    for criterion in criteria:   # evaluate all configured criteria, not just the first 6
         name        = criterion.get("name", "quality")
         description = criterion.get("description", name)
 
-        # Fix 2: skip policy-type criteria for factual questions
-        if _should_skip_criterion(question, description):
+        # Fix 2: skip policy-type criteria for factual questions,
+        # and skip escalation criteria for non-support queries.
+        if _should_skip_criterion(question, description, name):
             continue
 
         metric = GEval(
@@ -143,6 +203,9 @@ async def evaluate_quality(
     _set_azure_env(config)
 
     deval_model = make_deepeval_azure_model()
+    if deval_model is None:
+        print("[QualityEval] WARNING: Azure OpenAI not configured — GEval quality criteria "
+              "will be skipped. Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY to enable.")
 
     persona_map  = {p.persona_id: p for p in personas}
     results: List[MetricResult] = []
@@ -195,13 +258,20 @@ async def evaluate_quality(
 
         # ── GEval (domain-specific criteria, Fix 2+4+36) ─────────────────────
         # Respect config.use_geval — the UI toggle that disables GEval entirely.
-        if criteria_list and getattr(config, "use_geval", True):
+        # Filter out escalation criteria for non-support agents.
+        effective_criteria = [
+            c for c in criteria_list
+            if _is_support_agent(config) or not _is_escalation_criterion(
+                c.get("name", ""), c.get("description", "")
+            )
+        ]
+        if effective_criteria and getattr(config, "use_geval", True):
             async with sem:
                 try:
                     geval_result = await loop.run_in_executor(
                         None, _run_deepeval_geval,
                         last_turn.query, last_turn.response,
-                        criteria_list, criteria_weights, deval_model
+                        effective_criteria, criteria_weights, deval_model
                     )
                     method = geval_result.get("method", "deepeval_geval")
                     for criterion_name, score in geval_result["scores"].items():

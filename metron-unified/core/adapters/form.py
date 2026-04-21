@@ -82,6 +82,8 @@ class FormAdapter:
                     except Exception:
                         body = {"response": await resp.text()}
                     text = self._trim_response(self._extract(body))
+                    if text.startswith(("[Field '", "[Empty")):
+                        return AdapterResponse("", latency, error=text)
                     return AdapterResponse(text, latency)
         except Exception as e:
             latency = (time.monotonic() - start) * 1000
@@ -96,5 +98,5 @@ class FormAdapter:
             if isinstance(result, dict) and p in result:
                 result = result[p]
             else:
-                return "[Field not found]"
-        return str(result) if result else "[Empty]"
+                return f"[Field '{p}' not found]"
+        return str(result) if result else "[Empty response]"

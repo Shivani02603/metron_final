@@ -127,6 +127,35 @@ async def generate_functional_prompts(
     )
 
     generated: List[GeneratedPrompt] = []
+
+    # ── Priority 1: use multi_turn_scenario from rich persona generation ──
+    # These are pre-crafted literal prompts with real artifacts (typos, paste
+    # fragments, mixed languages) — far more diverse than LLM-generated generics.
+    if persona.multi_turn_scenario:
+        for turn in persona.multi_turn_scenario[:3]:
+            text = turn.get("prompt", "").strip()
+            if text:
+                generated.append(GeneratedPrompt(
+                    persona_id=persona.persona_id,
+                    test_class=TestClass.FUNCTIONAL,
+                    text=text,
+                    expected_behavior="",
+                    turn_number=turn.get("turn", 1),
+                ))
+        # If scenario gave us prompts, also add example_prompts as additional tests
+        for ep in persona.entry_points[:2]:
+            if ep and ep not in {g.text for g in generated}:
+                generated.append(GeneratedPrompt(
+                    persona_id=persona.persona_id,
+                    test_class=TestClass.FUNCTIONAL,
+                    text=ep,
+                    expected_behavior="",
+                    turn_number=1,
+                ))
+        if generated:
+            return generated
+
+    # ── Priority 2: LLM-generated prompts (grounded in app profile / RAG KB) ──
     try:
         data = await llm_client.complete_json(
             prompt, temperature=0.8, max_tokens=1200, task="fast", retries=2,
@@ -145,7 +174,7 @@ async def generate_functional_prompts(
         print(f"[FunctionalGen] LLM prompt generation failed for persona '{persona.name}' "
               f"(domain: {profile.domain}) — falling back to entry_points. Error: {e}")
 
-    # Fallback: use persona's entry_points
+    # ── Priority 3: entry_points from persona ─────────────────────────────
     if not generated:
         for i, ep in enumerate(persona.entry_points[:3]):
             generated.append(GeneratedPrompt(

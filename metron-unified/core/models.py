@@ -229,6 +229,14 @@ class Persona(BaseModel):
     entry_points:        List[str] = []
     initial_state:       ConversationState = ConversationState.SEEKING
     fishbone_dimensions: Dict[str, str] = {}
+    # Rich fields from testing taxonomy (populated by upgraded persona_builder)
+    testing_taxonomy_ids: List[str] = []     # e.g. ["A01", "A08"] or ["U07"]
+    edge_case_taxonomy_id: str = ""          # U01-U08 for user/edge_case personas
+    attack_trajectory:   List[Dict[str, Any]] = []   # 5-turn adversarial conversation trajectory
+    playbook_steps:      List[Dict[str, Any]] = []   # 4+ step attack playbook with literal prompts
+    multi_turn_scenario: List[Dict[str, Any]] = []   # 3-turn user edge-case scenario with literal prompts
+    evasion_techniques:  List[str] = []     # embedded evasion techniques (adversarial only)
+    risk_severity:       str = ""           # critical|high|medium|low (adversarial only)
 
 
 # ── Stage 2: Generated Test Prompts ───────────────────────────────────────
@@ -315,6 +323,8 @@ class MetricResult(BaseModel):
     failure_taxonomy_id:    Optional[str] = None   # e.g. "C1.9"
     failure_taxonomy_label: Optional[str] = None   # e.g. "Missing Few-Shot Examples in System Prompt"
     failure_reason:         Optional[str] = None   # 2-3 sentence specific explanation
+    # Testing taxonomy enrichment (from core/testing_taxonomy.py)
+    mitre_atlas_id:         Optional[str] = None   # e.g. "AML.T0051"
 
 
 # ── Stage 5: Aggregated Report ─────────────────────────────────────────────

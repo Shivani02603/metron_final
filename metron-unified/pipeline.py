@@ -36,7 +36,7 @@ from stages.s1_personas.coverage_validator import validate_and_fill
 from stages.s2_tests.functional_gen import generate_all_functional, generate_performance_prompts
 from stages.s2_tests.security_gen import generate_all_security
 from stages.s2_tests.quality_criteria import generate_quality_criteria
-from stages.s3_execution.conversation_runner import run_all_conversations
+from stages.s3_execution.conversation_runner import run_all_conversations, run_ground_truth_conversations
 from stages.s4_evaluation.functional import evaluate_functional
 from stages.s4_evaluation.security import evaluate_security
 from stages.s4_evaluation.quality import evaluate_quality
@@ -158,12 +158,12 @@ async def run_pipeline(
         _update(job_store, run_id, 20, "Generating domain-specific test prompts…", "test_gen")
         _log(job_store, run_id, "phase_start", {"phase": "test_gen", "label": "Test Generation"})
 
-        # 2a: Functional prompts — RAG mode uses ground truth Q&A pairs if provided
+        # 2a: Functional prompts — always LLM-generated, grounded in rag_text for RAG mode.
+        # Ground truth Q&A pairs are handled separately in Stream 2 (after Stage 3).
         rag_text = config.rag_text if config.is_rag else ""
         func_prompts = await generate_all_functional(
             personas, profile, llm_client,
             rag_text=rag_text,
-            ground_truth=config.ground_truth if config.is_rag else [],
             max_prompts=config.num_scenarios or 0,   # Fix 35: wire UI num_scenarios cap
         )
 
@@ -246,13 +246,33 @@ async def run_pipeline(
             evaluate_quality(conversations, personas, config, llm_client, quality_criteria),
         )
 
-        # RAG evaluation (only in RAG mode)
+        # ── Stream 2: Ground truth direct evaluation (RAG mode only) ─────────
+        # Sends ground truth questions straight to the RAG endpoint with no persona
+        # state machine. Collected conversations are merged with Stream 1 conversations
+        # so evaluate_rag scores both together.
+        gt_conversations: List[Conversation] = []
+        if config.is_rag and config.ground_truth:
+            _update(job_store, run_id, 60, f"Running ground truth stream ({len(config.ground_truth)} Q&A pairs)…", "rag")
+            _log(job_store, run_id, "phase_start", {"phase": "rag", "label": "Ground Truth Stream"})
+            try:
+                gt_conversations = await run_ground_truth_conversations(
+                    config.ground_truth, config, project_id
+                )
+                _log(job_store, run_id, "gt_stream_complete", {
+                    "total_pairs": len(config.ground_truth),
+                    "completed": len(gt_conversations),
+                })
+            except Exception as gt_err:
+                print(f"[Pipeline] Ground truth stream failed: {gt_err}")
+
+        # RAG evaluation (only in RAG mode) — evaluates Stream 1 + Stream 2 conversations
         rag_results: List[MetricResult] = []
         if config.is_rag:
-            _update(job_store, run_id, 70, "Running RAG evaluation (faithfulness, recall, precision)…", "rag")
+            all_rag_conversations = conversations + gt_conversations
+            _update(job_store, run_id, 70, "Running RAG evaluation (faithfulness, recall, precision, answer correctness)…", "rag")
             _log(job_store, run_id, "phase_start", {"phase": "rag", "label": "RAG Evaluation"})
             try:
-                rag_results = await evaluate_rag(conversations, personas, config, llm_client)
+                rag_results = await evaluate_rag(all_rag_conversations, personas, config, llm_client)
             except Exception as rag_err:
                 print(f"[Pipeline] RAG evaluation failed: {rag_err}")
             _update(job_store, run_id, 71, f"RAG: {len(rag_results)} metrics evaluated", "rag",
@@ -339,7 +359,7 @@ async def run_pipeline(
         _update(job_store, run_id, 90, "Aggregating results…", "aggregation")
         report = aggregate(
             metric_results=all_metric_results,
-            conversations=conversations,
+            conversations=conversations + gt_conversations,
             personas=personas,
             config=config,
             performance_metrics=perf_metrics,
@@ -356,7 +376,7 @@ async def run_pipeline(
         try:
             rca_report = run_rca(
                 metric_results=all_metric_results,
-                conversations=conversations,
+                conversations=conversations + gt_conversations,
                 config=config,
                 perf_metrics=perf_metrics,
                 load_metrics=load_metrics,

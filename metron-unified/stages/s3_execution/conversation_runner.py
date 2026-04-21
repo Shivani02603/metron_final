@@ -291,6 +291,67 @@ async def _combined_eval_generate(
         return None, ConversationState.ABANDONED, ResponseType.VAGUE, False
 
 
+async def run_ground_truth_conversations(
+    ground_truth: list,
+    config: RunConfig,
+    project_id: str = "",
+) -> List[Conversation]:
+    """
+    Stream 2: Send ground truth questions directly to the RAG endpoint.
+    No personas, no state machine — one question → one answer per pair.
+    Returns one Conversation per ground truth pair (skips pairs with no question).
+    """
+    adapter = RAGAdapter(
+        endpoint_url=config.endpoint_url,
+        request_field=config.request_field,
+        response_field=config.response_field,
+        auth_type=config.auth_type,
+        auth_token=config.auth_token,
+        timeout=getattr(config, "adapter_timeout", 60),
+        request_template=getattr(config, "request_template", None),
+        response_trim_marker=getattr(config, "response_trim_marker", None),
+    )
+
+    sem = asyncio.Semaphore(3)
+
+    async def _run_one(pair: dict) -> Optional[Conversation]:
+        question = pair.get("question", "").strip()
+        expected = pair.get("expected_answer", "").strip()
+        if not question:
+            return None
+
+        async with sem:
+            resp: AdapterResponse = await adapter.send(question)
+
+        turn = ConversationTurn(
+            turn_number=1,
+            query=question,
+            response=resp.text if resp.ok else f"[Error: {resp.error}]",
+            latency_ms=resp.latency_ms,
+            expected_answer=expected or None,
+            retrieved_context=resp.retrieved_context,
+            is_error_response=not resp.ok,
+            timestamp=datetime.utcnow(),
+        )
+
+        conv = Conversation(
+            project_id=project_id,
+            persona_id="ground_truth_stream",
+            persona_name="Ground Truth",
+            test_class=TestClass.FUNCTIONAL,
+        )
+        conv.turns.append(turn)
+        conv.total_latency_ms = resp.latency_ms
+        conv.goal_achieved = resp.ok
+        conv.ended_at = datetime.utcnow()
+        return conv
+
+    raw = await asyncio.gather(*[_run_one(pair) for pair in ground_truth])
+    results = [c for c in raw if c is not None]
+    print(f"[GroundTruthStream] {len(results)}/{len(ground_truth)} conversations completed")
+    return results
+
+
 async def run_all_conversations(
     personas: List[Persona],
     prompts: List[GeneratedPrompt],

@@ -185,6 +185,57 @@ def _run_ragas(
         return None, False, msg
 
 
+async def _run_answer_correctness(
+    conv: Conversation,
+    persona: Optional[Persona],
+    llm_client: Any,
+    query: str,
+    answer: str,
+    expected: str,
+) -> MetricResult:
+    """
+    LLM judge: compare generated answer vs expected answer (Stream 2).
+    Score 0.0–1.0. Pass threshold: 0.5.
+    """
+    prompt = f"""Score how well the generated answer matches the expected answer.
+
+Question: {query}
+
+Expected Answer: {expected}
+
+Generated Answer: {answer}
+
+Score from 0.0 to 1.0:
+- 1.0 = semantically identical, all key facts present
+- 0.7 = mostly correct, minor details missing
+- 0.5 = partially correct, some key facts present
+- 0.3 = related but missing most key facts
+- 0.0 = completely wrong or irrelevant
+
+Return JSON: {{"score": <float 0.0-1.0>, "reason": "<one sentence explaining the score>"}}"""
+
+    base = _base_meta(conv, persona, query, answer)
+    try:
+        data = await llm_client.complete_json(prompt, temperature=0.1, max_tokens=150, task="judge")
+        score = float(data.get("score", 0.0))
+        score = max(0.0, min(1.0, score))
+        return MetricResult(
+            **base,
+            metric_name="rag_answer_correctness",
+            score=round(score, 4),
+            passed=score >= _RAGAS_PASS_THRESHOLD,
+            reason=data.get("reason", ""),
+        )
+    except Exception as e:
+        return MetricResult(
+            **base,
+            metric_name="rag_answer_correctness",
+            score=0.0, passed=False, reason="",
+            skipped=True,
+            skip_reason=f"LLM judge error: {str(e)[:120]}",
+        )
+
+
 async def _run_deepeval_metrics(
     conv: Conversation,
     persona: Optional[Persona],
@@ -375,6 +426,33 @@ async def evaluate_rag(
         for batch in batches:
             all_results.extend(batch)
 
+    # ── Answer Correctness — Stream 2 only (convs with expected_answer) ───────
+    # Compares the RAG system's generated answer against the ground truth expected
+    # answer using an LLM judge. Only runs when expected_answer is present on the turn.
+    correctness_convs = [
+        c for c in rag_convs
+        if c.turns and c.turns[0].expected_answer
+    ]
+    if correctness_convs and llm_client:
+        sem2 = asyncio.Semaphore(3)
+
+        async def _bounded_correctness(conv: Conversation):
+            persona = persona_map.get(conv.persona_id)
+            t       = conv.turns[0]
+            async with sem2:
+                return await _run_answer_correctness(
+                    conv, persona, llm_client,
+                    t.query, t.response, t.expected_answer,
+                )
+
+        correctness_results = await asyncio.gather(*[_bounded_correctness(c) for c in correctness_convs])
+        all_results.extend(correctness_results)
+        print(f"[RAG Eval] Answer correctness: {len(correctness_results)} results "
+              f"({sum(1 for r in correctness_results if r.passed)} passed)")
+
+    gt_count = sum(1 for c in rag_convs if c.persona_id == "ground_truth_stream")
+    persona_count = len(rag_convs) - gt_count
     print(f"[RAG Eval] Complete — {len(all_results)} metric results "
-          f"({len(rag_convs)} conversations, ground_truth={'yes' if has_gt else 'no'})")
+          f"({persona_count} persona-based, {gt_count} ground-truth, "
+          f"ground_truth_answers={'yes' if has_gt else 'no'})")
     return all_results

@@ -235,13 +235,14 @@ class RunConfig(BaseModel):
     # RAG
     is_rag:       bool = False
     rag_text:     str  = ""
-    ground_truth: List[Dict] = []   # [{"question": ..., "expected_answer": ..., "context": str|list}]
+    ground_truth: List[Dict] = []   # [{"question": ..., "expected_answer": ...}]
 
     @field_validator("ground_truth", mode="before")
     @classmethod
     def _validate_ground_truth(cls, v):
         """
         Validate ground_truth entries have the required 'question' key.
+        Format: {"question": ..., "expected_answer": ...} — no context chunks needed.
         Entries missing 'question' are dropped with a warning rather than
         crashing mid-pipeline with a cryptic KeyError.
         """
@@ -255,7 +256,10 @@ class RunConfig(BaseModel):
             if not entry.get("question", "").strip():
                 print(f"[RunConfig] ground_truth[{i}] missing 'question' field — skipped")
                 continue
-            valid.append(entry)
+            valid.append({
+                "question": entry["question"].strip(),
+                "expected_answer": entry.get("expected_answer", "").strip(),
+            })
         return valid
 
     # Test parameters

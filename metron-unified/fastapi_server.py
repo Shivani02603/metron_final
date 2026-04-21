@@ -359,20 +359,10 @@ async def run_tests(
                             r.get("a") or r.get("reference") or
                             r.get("expected_output") or r.get("ground_truth") or ""
                         )
-                        # Context — accept multiple field names; preserve list as-is
-                        c = (
-                            r.get("context") or r.get("expected_chunk") or
-                            r.get("chunk") or r.get("contexts") or
-                            r.get("retrieved_context") or r.get("source") or
-                            r.get("passages") or ""
-                        )
                         if q and a:
                             pairs.append({
                                 "question":        str(q).strip(),
                                 "expected_answer": str(a).strip(),
-                                # Preserve list context as-is so _ground_truth_to_prompts
-                                # can keep individual chunks separate.
-                                "context": c,
                             })
                     config_data["ground_truth"] = pairs
                     print(f"[API] Parsed {len(pairs)} ground truth pairs from JSON ({filename})")
@@ -394,16 +384,10 @@ async def run_tests(
                         row.get("a") or row.get("reference") or
                         row.get("ground_truth") or ""
                     )
-                    c = (
-                        row.get("context") or row.get("expected_chunk") or
-                        row.get("chunk") or row.get("contexts") or
-                        row.get("source") or ""
-                    )
                     if q and a:
                         pairs.append({
                             "question":        q.strip(),
                             "expected_answer": a.strip(),
-                            "context":         c.strip(),
                         })
                 config_data["ground_truth"] = pairs
                 print(f"[API] Parsed {len(pairs)} ground truth pairs from CSV ({filename})")

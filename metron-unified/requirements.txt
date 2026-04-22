@@ -44,6 +44,7 @@ datasets>=2.14.0
 # spacy version managed by presidio-analyzer (requires spacy~=3.4 or 3.5, not 3.7)
 # Do NOT pin spacy here — let presidio pull its compatible version automatically
 torch>=2.0.0            # required by detoxify
+sentence-transformers>=2.6.0   # cosine similarity for RAG answer correctness
 
 # ── Optional: document parsing ───────────────────────────────────────────────
 # PyPDF2>=3.0.0

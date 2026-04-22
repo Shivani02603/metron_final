@@ -1,36 +1,37 @@
 """
-Stage 4f: RAG evaluation using RAGAS + DeepEval.
+Stage 4f: RAG evaluation — Answer Relevancy + Answer Correctness (hybrid).
 
-Tool split:
-  RAGAS    → non-LLM metrics first (no API calls required):
-               NonLLMContextPrecisionWithReference  (RAGAS 0.2.x+)
-               NonLLMContextRecall                  (RAGAS 0.2.x+)
-             LLM metric added only when Azure env is confirmed available:
-               Faithfulness (LLM-based, Azure GPT-4o)
-  DeepEval → answer_relevancy, contextual_relevancy (per-conv, Azure GPT-4o)
+Two metrics only — no context required:
 
-Fix 18: only the RAGAS metrics listed in config.ragas_metrics are run.
-Fix 16: empty context uses "NO_CONTEXT_RETRIEVED" placeholder with an explicit
-        warning instead of the silent [""] fallback.
-Fix 20: asyncio.get_running_loop() replaces deprecated get_event_loop().
-Fix 36: DeepEval exceptions → skipped MetricResult instead of silent drop.
+  Answer Relevancy  (DeepEval, LLM-based)
+    → Is the generated answer on-topic for the question?
+    → Runs on ALL RAG conversations (Stream 1 + Stream 2).
 
-Non-LLM metrics always run regardless of Azure configuration.
-LLM metrics are additive — failure does not suppress non-LLM results.
+  Answer Correctness  (three-way hybrid: exact match + cosine similarity + LLM judge → max of all three)
+    → Does the generated answer match the expected answer?
+    → Runs only on Stream 2 conversations (ground truth Q&A pairs).
+    → Exact match   : catches identical answers with minor formatting differences (instant, no API).
+    → Cosine sim    : catches paraphrases / different phrasing of the same fact (local, no API).
+    → LLM judge     : catches numerical equivalents, partial answers, edge cases (API call).
+    → Final score = max(exact, cosine, llm) so no correct answer is ever penalised.
+
+All context-dependent metrics (faithfulness, context precision, context recall,
+contextual relevancy) have been removed — they require real retrieved chunks from
+the endpoint which are not reliably available.
 """
 
 from __future__ import annotations
 import asyncio
-import math
-import os
-
-_RAGAS_PASS_THRESHOLD = 0.5   # minimum score for a RAGAS metric to be considered passing
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from core.models import (
     Conversation, MetricResult, Persona, RunConfig, TestClass,
 )
 
+_PASS_THRESHOLD = 0.5
+
+
+# ── Shared metadata helper ─────────────────────────────────────────────────────
 
 def _base_meta(conv: Conversation, persona: Optional[Persona], query: str, response: str) -> Dict[str, Any]:
     return {
@@ -46,144 +47,48 @@ def _base_meta(conv: Conversation, persona: Optional[Persona], query: str, respo
     }
 
 
-def _build_azure_ragas_llm():
-    """Build a RAGAS-compatible LLM wrapper using the shared Azure LangChain client."""
-    from ragas.llms import LangchainLLMWrapper  # type: ignore
-    from stages.s4_evaluation.functional import _build_azure_langchain_llm
-    return LangchainLLMWrapper(_build_azure_langchain_llm())
+# ── Cosine similarity via sentence-transformers ────────────────────────────────
+
+_embedding_model = None   # loaded once on first use
 
 
-def _build_ragas_dataset(
-    questions: List[str],
-    answers: List[str],
-    contexts: List[List[str]],
-    ground_truths: List[str],
-):
+def _cosine_similarity(text_a: str, text_b: str) -> float:
     """
-    Build RAGAS dataset — tries 0.4.x EvaluationDataset first, falls back to HF Dataset.
-    Returns (dataset, column_style) where column_style is "new" or "old".
+    Compute cosine similarity between two texts using a lightweight sentence
+    embedding model (all-MiniLM-L6-v2, ~80 MB, downloaded once).
+    Returns a float in [0.0, 1.0].
     """
+    global _embedding_model
     try:
-        from ragas import EvaluationDataset, SingleTurnSample  # type: ignore
-        samples = []
-        for q, a, ctx, gt in zip(questions, answers, contexts, ground_truths):
-            sample = SingleTurnSample(
-                user_input=q,
-                response=a,
-                retrieved_contexts=ctx if ctx else [""],
-                reference=gt if gt and gt.strip() else None,
-            )
-            samples.append(sample)
-        return EvaluationDataset(samples=samples), "new"
-    except (ImportError, AttributeError):
-        from datasets import Dataset  # type: ignore
-        data = {
-            "question":     questions,
-            "answer":       answers,
-            "contexts":     contexts,
-            "ground_truth": ground_truths,
-        }
-        return Dataset.from_dict(data), "old"
-
-
-def _extract_ragas_scores(result: Any, column_style: str) -> Optional[Any]:
-    """
-    Extract a pandas DataFrame from the RAGAS result object.
-    Handles both 0.4.x and 0.1.x result formats.
-    """
-    try:
-        df = result.to_pandas()
-        rename_map = {
-            "user_input":         "question",
-            "response":           "answer",
-            "retrieved_contexts": "contexts",
-            "reference":          "ground_truth",
-        }
-        df = df.rename(columns=rename_map)
-        return df
+        from sentence_transformers import SentenceTransformer, util  # type: ignore
+        if _embedding_model is None:
+            _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        embeddings = _embedding_model.encode([text_a, text_b], convert_to_tensor=True)
+        score = float(util.cos_sim(embeddings[0], embeddings[1]).item())
+        return max(0.0, min(1.0, score))
     except Exception as e:
-        print(f"[RAG/RAGAS] Could not convert result to DataFrame: {e}")
-        return None
+        print(f"[RAG/Cosine] Embedding similarity failed: {e}")
+        return 0.0
 
 
-def _run_ragas(
-    questions: List[str],
-    answers: List[str],
-    contexts: List[List[str]],
-    ground_truths: List[str],
-    active_ragas_metrics: set,
-) -> Tuple[Optional[Any], bool, str]:
+# ── Exact match ───────────────────────────────────────────────────────────────
+
+def _exact_match(text_a: str, text_b: str) -> float:
     """
-    Run RAGAS evaluate() synchronously.
-
-    Fix 18: active_ragas_metrics controls which metrics are attempted.
-
-    Metric priority:
-      1. Non-LLM metrics (no Azure required, always attempted when in active set):
-           NonLLMContextPrecisionWithReference  — requires ground_truth
-           NonLLMContextRecall                  — requires ground_truth
-      2. LLM metric (Azure required, added only when in active set and env set):
-           Faithfulness
-
-    Returns (result_df, has_ground_truth, status_msg).
+    Normalised exact match: lowercase, strip punctuation and extra whitespace.
+    Returns 1.0 if texts match after normalisation, 0.0 otherwise.
     """
-    try:
-        from ragas import evaluate as ragas_evaluate  # type: ignore
+    import re
+    def _normalise(t: str) -> str:
+        t = t.lower().strip()
+        t = re.sub(r"[^\w\s]", "", t)   # strip punctuation
+        t = re.sub(r"\s+", " ", t)      # collapse whitespace
+        return t
 
-        has_ground_truth = any(gt.strip() for gt in ground_truths)
-        active_metrics: List[Any] = []
+    return 1.0 if _normalise(text_a) == _normalise(text_b) else 0.0
 
-        # ── 1. Non-LLM metrics ────────────────────────────────────────────────
-        if has_ground_truth and "context_precision" in active_ragas_metrics:
-            try:
-                from ragas.metrics import NonLLMContextPrecisionWithReference  # type: ignore
-                active_metrics.append(NonLLMContextPrecisionWithReference())
-                print("[RAG/RAGAS] Added NonLLMContextPrecisionWithReference")
-            except (ImportError, Exception) as e:
-                print(f"[RAG/RAGAS] NonLLMContextPrecisionWithReference unavailable: {e}")
 
-        if has_ground_truth and "context_recall" in active_ragas_metrics:
-            try:
-                from ragas.metrics import NonLLMContextRecall  # type: ignore
-                active_metrics.append(NonLLMContextRecall())
-                print("[RAG/RAGAS] Added NonLLMContextRecall")
-            except (ImportError, Exception) as e:
-                print(f"[RAG/RAGAS] NonLLMContextRecall unavailable: {e}")
-
-        # ── 2. LLM metric: faithfulness ───────────────────────────────────────
-        azure_ready = bool(
-            os.environ.get("AZURE_OPENAI_ENDPOINT") and
-            os.environ.get("AZURE_OPENAI_API_KEY")
-        )
-        if "faithfulness" in active_ragas_metrics and azure_ready:
-            try:
-                ragas_llm = _build_azure_ragas_llm()
-                try:
-                    from ragas.metrics import faithfulness  # type: ignore
-                    faithfulness.llm = ragas_llm
-                    active_metrics.append(faithfulness)
-                except AttributeError:
-                    from ragas.metrics import Faithfulness  # type: ignore
-                    active_metrics.append(Faithfulness(llm=ragas_llm))
-                print("[RAG/RAGAS] Added Faithfulness (LLM-based, Azure)")
-            except Exception as e:
-                print(f"[RAG/RAGAS] Faithfulness metric setup failed (non-LLM metrics still run): {e}")
-        elif "faithfulness" in active_ragas_metrics:
-            print("[RAG/RAGAS] Azure env not set — skipping Faithfulness (non-LLM metrics still run)")
-
-        if not active_metrics:
-            return None, has_ground_truth, "No RAGAS metrics could be initialised (ground_truth required for non-LLM metrics)"
-
-        dataset, column_style = _build_ragas_dataset(questions, answers, contexts, ground_truths)
-        result = ragas_evaluate(dataset, metrics=active_metrics)
-        df = _extract_ragas_scores(result, column_style)
-        return df, has_ground_truth, "ok"
-
-    except Exception as e:
-        msg = str(e)[:300]
-        print(f"[RAG/RAGAS] Evaluation failed: {msg}")
-        return None, False, msg
-
+# ── Answer Correctness — three-way hybrid ─────────────────────────────────────
 
 async def _run_answer_correctness(
     conv: Conversation,
@@ -194,10 +99,41 @@ async def _run_answer_correctness(
     expected: str,
 ) -> MetricResult:
     """
-    LLM judge: compare generated answer vs expected answer (Stream 2).
-    Score 0.0–1.0. Pass threshold: 0.5.
+    Three-way hybrid answer correctness — final score = max(exact, cosine, llm):
+
+    1. Exact Match       — normalised string comparison (fastest, no API)
+                           catches: identical answers with minor formatting differences
+    2. Cosine Similarity — sentence embedding similarity (local, no API)
+                           catches: paraphrases, same fact in different words
+    3. LLM Judge         — instructed to accept all valid answer forms (API call)
+                           catches: numerical equivalents, partial answers, edge cases
+
+    Taking max means a correct answer is never penalised just because one
+    method didn't recognise it.
     """
-    prompt = f"""Score how well the generated answer matches the expected answer.
+    base = _base_meta(conv, persona, query, answer)
+    loop = asyncio.get_running_loop()
+
+    # ── 1. Exact match (sync, instant) ───────────────────────────────────────
+    exact_score = _exact_match(answer, expected)
+
+    # Short-circuit: perfect exact match → no need for cosine or LLM
+    if exact_score == 1.0:
+        return MetricResult(
+            **base,
+            metric_name="rag_answer_correctness",
+            score=1.0,
+            passed=True,
+            reason="exact=1.000 — normalised exact match",
+        )
+
+    # ── 2. Cosine similarity (sync in executor, no API) ───────────────────────
+    cosine_score = await loop.run_in_executor(
+        None, _cosine_similarity, answer, expected
+    )
+
+    # ── 3. LLM judge ──────────────────────────────────────────────────────────
+    judge_prompt = f"""You are evaluating whether a RAG system produced a correct answer.
 
 Question: {query}
 
@@ -205,98 +141,272 @@ Expected Answer: {expected}
 
 Generated Answer: {answer}
 
-Score from 0.0 to 1.0:
-- 1.0 = semantically identical, all key facts present
-- 0.7 = mostly correct, minor details missing
-- 0.5 = partially correct, some key facts present
-- 0.3 = related but missing most key facts
-- 0.0 = completely wrong or irrelevant
+Rules for scoring:
+- Accept ALL valid phrasings of the same fact as correct (score >= 0.8)
+- "6 months" = "six months" = "180 days" = "a six-month period" — all correct
+- An answer containing the correct key fact plus extra context is still correct
+- An answer more detailed than expected but factually correct is still correct
+- Only score low (< 0.5) if the key fact is wrong, contradicts the expected answer, or is completely missing
+- Score 0.0 ONLY if the answer is entirely wrong or completely off-topic
 
-Return JSON: {{"score": <float 0.0-1.0>, "reason": "<one sentence explaining the score>"}}"""
+Score from 0.0 to 1.0 and return JSON:
+{{"score": <float 0.0-1.0>, "reason": "<one sentence: what matched or what was wrong>"}}"""
 
-    base = _base_meta(conv, persona, query, answer)
+    llm_score = 0.0
+    llm_reason = ""
     try:
-        data = await llm_client.complete_json(prompt, temperature=0.1, max_tokens=150, task="judge")
+        data = await llm_client.complete_json(
+            judge_prompt, temperature=0.0, max_tokens=150, task="judge"
+        )
+        llm_score = float(data.get("score", 0.0))
+        llm_score = max(0.0, min(1.0, llm_score))
+        llm_reason = data.get("reason", "")
+    except Exception as e:
+        print(f"[RAG/Correctness] LLM judge failed, falling back to cosine: {e}")
+        llm_reason = f"LLM judge unavailable: {str(e)[:80]}"
+
+    # ── 4. Final score = max of all three ────────────────────────────────────
+    final_score = max(exact_score, cosine_score, llm_score)
+    reason = (
+        f"exact={exact_score:.3f}, cosine={cosine_score:.3f}, "
+        f"llm={llm_score:.3f}, final=max → {final_score:.3f}. {llm_reason}"
+    )
+
+    return MetricResult(
+        **base,
+        metric_name="rag_answer_correctness",
+        score=round(final_score, 4),
+        passed=final_score >= _PASS_THRESHOLD,
+        reason=reason,
+    )
+
+
+# ── Hallucination — ground truth based ───────────────────────────────────────
+
+async def _run_hallucination(
+    conv: Conversation,
+    persona: Optional[Persona],
+    llm_client: Any,
+    query: str,
+    answer: str,
+    expected: str,
+) -> MetricResult:
+    """
+    LLM judge checks if the response contains information that is not present in
+    or contradicts the ground truth answer.
+    Score is inverse hallucination — 1.0 means no hallucination, 0.0 means heavy hallucination.
+    """
+    base = _base_meta(conv, persona, query, answer)
+
+    judge_prompt = f"""You are evaluating whether a RAG system hallucinated in its response.
+
+Question: {query}
+
+Ground Truth Answer: {expected}
+
+Generated Answer: {answer}
+
+Your task: Check if the Generated Answer contains any facts, claims, or information that are NOT present in the Ground Truth Answer or that directly contradict it.
+
+Rules:
+- If the Generated Answer only contains information that is supported by or consistent with the Ground Truth, score HIGH (close to 1.0)
+- If the Generated Answer adds extra facts or details NOT in the Ground Truth, score LOW (close to 0.0)
+- If the Generated Answer contradicts the Ground Truth, score 0.0
+- Minor rephrasing or synonyms of the same fact are NOT hallucination
+- Additional context that is a reasonable elaboration of the ground truth without adding new unverifiable claims is acceptable
+
+Score from 0.0 to 1.0 (1.0 = no hallucination, 0.0 = severe hallucination) and return JSON:
+{{"score": <float 0.0-1.0>, "reason": "<one sentence: what was hallucinated or why it passed>"}}"""
+
+    try:
+        data = await llm_client.complete_json(
+            judge_prompt, temperature=0.0, max_tokens=150, task="judge"
+        )
         score = float(data.get("score", 0.0))
         score = max(0.0, min(1.0, score))
-        return MetricResult(
-            **base,
-            metric_name="rag_answer_correctness",
-            score=round(score, 4),
-            passed=score >= _RAGAS_PASS_THRESHOLD,
-            reason=data.get("reason", ""),
-        )
+        reason = data.get("reason", "")
     except Exception as e:
         return MetricResult(
             **base,
-            metric_name="rag_answer_correctness",
+            metric_name="rag_hallucination",
             score=0.0, passed=False, reason="",
             skipped=True,
-            skip_reason=f"LLM judge error: {str(e)[:120]}",
+            skip_reason=f"LLM judge unavailable: {str(e)[:120]}",
         )
 
+    return MetricResult(
+        **base,
+        metric_name="rag_hallucination",
+        score=round(score, 4),
+        passed=score >= _PASS_THRESHOLD,
+        reason=reason,
+    )
 
-async def _run_deepeval_metrics(
+
+# ── Completeness — ground truth based ─────────────────────────────────────────
+
+async def _run_completeness(
+    conv: Conversation,
+    persona: Optional[Persona],
+    llm_client: Any,
+    query: str,
+    answer: str,
+    expected: str,
+) -> MetricResult:
+    """
+    LLM judge checks if the response covers all key facts/points present in the
+    ground truth answer. Did the model miss anything important?
+    """
+    base = _base_meta(conv, persona, query, answer)
+
+    judge_prompt = f"""You are evaluating whether a RAG system's response is complete.
+
+Question: {query}
+
+Ground Truth Answer: {expected}
+
+Generated Answer: {answer}
+
+Your task: Check if the Generated Answer covers all the key facts and points present in the Ground Truth Answer.
+
+Rules:
+- If the Generated Answer covers all key facts from the Ground Truth, score HIGH (close to 1.0)
+- If the Generated Answer misses some key facts from the Ground Truth, score proportionally lower
+- If the Generated Answer misses most or all key facts, score LOW (close to 0.0)
+- Minor wording differences are fine — focus on whether the key information is present
+- Extra information in the Generated Answer beyond the Ground Truth does not affect the score negatively
+
+Score from 0.0 to 1.0 (1.0 = fully complete, 0.0 = completely missing key facts) and return JSON:
+{{"score": <float 0.0-1.0>, "reason": "<one sentence: what key facts were covered or missed>"}}"""
+
+    try:
+        data = await llm_client.complete_json(
+            judge_prompt, temperature=0.0, max_tokens=150, task="judge"
+        )
+        score = float(data.get("score", 0.0))
+        score = max(0.0, min(1.0, score))
+        reason = data.get("reason", "")
+    except Exception as e:
+        return MetricResult(
+            **base,
+            metric_name="rag_completeness",
+            score=0.0, passed=False, reason="",
+            skipped=True,
+            skip_reason=f"LLM judge unavailable: {str(e)[:120]}",
+        )
+
+    return MetricResult(
+        **base,
+        metric_name="rag_completeness",
+        score=round(score, 4),
+        passed=score >= _PASS_THRESHOLD,
+        reason=reason,
+    )
+
+
+# ── Factual Consistency — ground truth based ──────────────────────────────────
+
+async def _run_factual_consistency(
+    conv: Conversation,
+    persona: Optional[Persona],
+    llm_client: Any,
+    query: str,
+    answer: str,
+    expected: str,
+) -> MetricResult:
+    """
+    LLM judge checks if specific verifiable facts (numbers, dates, names, quantities)
+    in the response match the ground truth answer.
+    """
+    base = _base_meta(conv, persona, query, answer)
+
+    judge_prompt = f"""You are evaluating whether a RAG system's response is factually consistent with the ground truth.
+
+Question: {query}
+
+Ground Truth Answer: {expected}
+
+Generated Answer: {answer}
+
+Your task: Focus specifically on verifiable facts — numbers, dates, names, quantities, percentages, durations, and proper nouns. Check if these match between the Generated Answer and Ground Truth Answer.
+
+Rules:
+- If all specific facts in the Generated Answer match the Ground Truth, score HIGH (close to 1.0)
+- If some facts are wrong or inconsistent, score proportionally lower
+- If the Generated Answer has no specific facts to check, score 1.0 (nothing to be wrong)
+- "6 months" and "180 days" and "six months" are all consistent — equivalent forms are acceptable
+- Only penalise when a fact clearly contradicts the Ground Truth (e.g., wrong number, wrong name)
+
+Score from 0.0 to 1.0 (1.0 = all facts consistent, 0.0 = facts are wrong) and return JSON:
+{{"score": <float 0.0-1.0>, "reason": "<one sentence: which facts matched or which were inconsistent>"}}"""
+
+    try:
+        data = await llm_client.complete_json(
+            judge_prompt, temperature=0.0, max_tokens=150, task="judge"
+        )
+        score = float(data.get("score", 0.0))
+        score = max(0.0, min(1.0, score))
+        reason = data.get("reason", "")
+    except Exception as e:
+        return MetricResult(
+            **base,
+            metric_name="rag_factual_consistency",
+            score=0.0, passed=False, reason="",
+            skipped=True,
+            skip_reason=f"LLM judge unavailable: {str(e)[:120]}",
+        )
+
+    return MetricResult(
+        **base,
+        metric_name="rag_factual_consistency",
+        score=round(score, 4),
+        passed=score >= _PASS_THRESHOLD,
+        reason=reason,
+    )
+
+
+# ── Answer Relevancy — DeepEval (question + answer only) ──────────────────────
+
+async def _run_answer_relevancy(
     conv: Conversation,
     persona: Optional[Persona],
     deval_model: Any,
     query: str,
     answer: str,
-    context: List[str],
-    expected: str,
-) -> List[MetricResult]:
+) -> MetricResult:
     """
-    Run DeepEval RAG metrics per conversation:
-      - AnswerRelevancyMetric
-      - ContextualRelevancyMetric
-
-    Fix 36: exceptions produce skipped MetricResult instead of score=0.0.
+    DeepEval AnswerRelevancyMetric: is the answer on-topic for the question?
+    Needs only question + answer — no context required.
     """
-    from deepeval.metrics import AnswerRelevancyMetric, ContextualRelevancyMetric  # type: ignore
-    from deepeval.test_case import LLMTestCase  # type: ignore
+    from deepeval.metrics import AnswerRelevancyMetric  # type: ignore
+    from deepeval.test_case import LLMTestCase          # type: ignore
 
-    base    = _base_meta(conv, persona, query, answer)
-    results = []
-    loop    = asyncio.get_running_loop()   # Fix 20
+    base = _base_meta(conv, persona, query, answer)
+    loop = asyncio.get_running_loop()
 
-    safe_context = context if context else ["(no context retrieved)"]
+    try:
+        test_case = LLMTestCase(input=query, actual_output=answer)
+        metric    = AnswerRelevancyMetric(model=deval_model, threshold=_PASS_THRESHOLD)
+        await loop.run_in_executor(None, metric.measure, test_case)
+        score = float(metric.score or 0.0)
+        return MetricResult(
+            **base,
+            metric_name="rag_answer_relevancy",
+            score=round(score, 4),
+            passed=metric.is_successful(),
+            reason=metric.reason or "",
+        )
+    except Exception as e:
+        return MetricResult(
+            **base,
+            metric_name="rag_answer_relevancy",
+            score=0.0, passed=False, reason="",
+            skipped=True,
+            skip_reason=f"DeepEval error: {str(e)[:120]}",
+        )
 
-    for metric_cls, metric_name in [
-        (AnswerRelevancyMetric,     "rag_answer_relevancy"),
-        (ContextualRelevancyMetric, "rag_context_relevancy"),
-    ]:
-        try:
-            tc_kwargs: Dict[str, Any] = {
-                "input":             query,
-                "actual_output":     answer,
-                "retrieval_context": safe_context,
-            }
-            if expected:
-                tc_kwargs["expected_output"] = expected
 
-            test_case = LLMTestCase(**tc_kwargs)
-            metric    = metric_cls(model=deval_model, threshold=0.5)
-            await loop.run_in_executor(None, metric.measure, test_case)
-            score = float(metric.score or 0.0)
-            results.append(MetricResult(
-                **base,
-                metric_name=metric_name,
-                score=round(score, 4),
-                passed=metric.is_successful(),
-                reason=metric.reason or "",
-            ))
-        except Exception as e:
-            # Fix 36: skipped result instead of silent failure
-            results.append(MetricResult(
-                **base,
-                metric_name=metric_name,
-                score=0.0, passed=False, reason="",
-                skipped=True,
-                skip_reason=f"DeepEval error: {str(e)[:120]}",
-            ))
-
-    return results
-
+# ── Main entry point ───────────────────────────────────────────────────────────
 
 async def evaluate_rag(
     conversations: List[Conversation],
@@ -305,103 +415,32 @@ async def evaluate_rag(
     llm_client: Any,
 ) -> List[MetricResult]:
     """
-    Run RAG evaluation using RAGAS (batch) + DeepEval (per-conv).
+    RAG evaluation — two metrics, no context dependency:
 
-    Fix 18: only metrics listed in config.ragas_metrics are run.
-    Fix 16: missing context logs a warning and uses "NO_CONTEXT_RETRIEVED" placeholder.
-    Returns list of MetricResult objects.
+      rag_answer_relevancy   → all RAG functional conversations (Stream 1 + Stream 2)
+      rag_answer_correctness → Stream 2 only (conversations with expected_answer)
+
+    Returns list of MetricResult objects tagged superset="rag".
     """
     from core.deepeval_azure import make_deepeval_azure_model  # type: ignore
     from stages.s4_evaluation.functional import _set_azure_env
 
     _set_azure_env(config)
 
-    # Fix 18: build active metric set from config (default to all if not specified)
-    _default_ragas = {"faithfulness", "answer_relevancy", "context_recall", "context_precision"}
-    active_ragas = set(getattr(config, "ragas_metrics", None) or _default_ragas)
-
+    # All functional conversations from both streams
     rag_convs = [
         c for c in conversations
-        if c.test_class == TestClass.FUNCTIONAL
-        and c.turns
-        and (c.turns[0].retrieved_context or c.turns[0].expected_answer)
+        if c.test_class == TestClass.FUNCTIONAL and c.turns
     ]
 
     if not rag_convs:
-        print("[RAG Eval] No functional conversations with context or expected_answer — skipping RAG metrics.")
+        print("[RAG Eval] No functional conversations — skipping RAG metrics.")
         return []
 
     persona_map = {p.persona_id: p for p in personas}
-
-    questions:     List[str]       = []
-    answers:       List[str]       = []
-    contexts:      List[List[str]] = []
-    ground_truths: List[str]       = []
-
-    for conv in rag_convs:
-        t = conv.turns[0]
-        questions.append(t.query)
-        answers.append(t.response)
-
-        # Fix 16: warn when context is missing; use explicit placeholder
-        if t.retrieved_context:
-            contexts.append(t.retrieved_context)
-        else:
-            print(
-                f"[RAG Eval] Warning: no retrieved_context for conv {conv.conversation_id[:8]} "
-                f"(persona: {conv.persona_name}). RAGAS will use NO_CONTEXT_RETRIEVED placeholder — "
-                f"context precision/recall scores will reflect a context miss, not a real retrieval."
-            )
-            contexts.append(["NO_CONTEXT_RETRIEVED"])
-
-        ground_truths.append(t.expected_answer or "")
-
     all_results: List[MetricResult] = []
 
-    # ── RAGAS batch evaluation ─────────────────────────────────────────────────
-    loop = asyncio.get_running_loop()   # Fix 20
-    df, has_gt, ragas_status = await loop.run_in_executor(
-        None, _run_ragas, questions, answers, contexts, ground_truths, active_ragas
-    )
-
-    if df is not None:
-        ragas_metric_cols = {
-            "faithfulness":      "rag_faithfulness",
-            "context_recall":    "rag_context_recall",
-            "context_precision": "rag_context_precision",
-            "non_llm_context_precision_with_reference": "rag_context_precision",
-            "non_llm_context_recall":                   "rag_context_recall",
-        }
-        for idx, conv in enumerate(rag_convs):
-            persona = persona_map.get(conv.persona_id)
-            t       = conv.turns[0]
-            base    = _base_meta(conv, persona, t.query, t.response)
-            if idx >= len(df):
-                continue
-            row = df.iloc[idx]
-
-            # Flag context miss in reason
-            missing_ctx = contexts[idx] == ["NO_CONTEXT_RETRIEVED"]
-
-            for col, metric_name in ragas_metric_cols.items():
-                if col not in df.columns:
-                    continue
-                raw_score = row[col]
-                score = float(raw_score) if (raw_score == raw_score and not (isinstance(raw_score, float) and math.isnan(raw_score))) else 0.0
-                reason = f"RAGAS {col}: {score:.3f}"
-                if missing_ctx:
-                    reason += " (Warning: no context retrieved from endpoint)"
-                all_results.append(MetricResult(
-                    **base,
-                    metric_name=metric_name,
-                    score=round(score, 4),
-                    passed=score >= _RAGAS_PASS_THRESHOLD,
-                    reason=reason,
-                ))
-    else:
-        print(f"[RAG/RAGAS] Skipped — {ragas_status}")
-
-    # ── DeepEval per-conversation ─────────────────────────────────────────────
+    # ── Answer Relevancy — all conversations ──────────────────────────────────
     try:
         deval_model = make_deepeval_azure_model()
     except Exception as e:
@@ -411,29 +450,26 @@ async def evaluate_rag(
     if deval_model:
         sem = asyncio.Semaphore(3)
 
-        async def _bounded_deepeval(conv: Conversation):
+        async def _bounded_relevancy(conv: Conversation):
             persona = persona_map.get(conv.persona_id)
             t       = conv.turns[0]
             async with sem:
-                return await _run_deepeval_metrics(
-                    conv, persona, deval_model,
-                    t.query, t.response,
-                    t.retrieved_context or [],
-                    t.expected_answer or "",
+                return await _run_answer_relevancy(
+                    conv, persona, deval_model, t.query, t.response
                 )
 
-        batches = await asyncio.gather(*[_bounded_deepeval(c) for c in rag_convs])
-        for batch in batches:
-            all_results.extend(batch)
+        relevancy_results = await asyncio.gather(*[_bounded_relevancy(c) for c in rag_convs])
+        all_results.extend(relevancy_results)
+        passed_rel = sum(1 for r in relevancy_results if r.passed)
+        print(f"[RAG Eval] Answer relevancy: {passed_rel}/{len(relevancy_results)} passed")
 
-    # ── Answer Correctness — Stream 2 only (convs with expected_answer) ───────
-    # Compares the RAG system's generated answer against the ground truth expected
-    # answer using an LLM judge. Only runs when expected_answer is present on the turn.
+    # ── Answer Correctness — Stream 2 only (has expected_answer) ─────────────
     correctness_convs = [
         c for c in rag_convs
-        if c.turns and c.turns[0].expected_answer
+        if c.turns[0].expected_answer
     ]
-    if correctness_convs and llm_client:
+
+    if correctness_convs:
         sem2 = asyncio.Semaphore(3)
 
         async def _bounded_correctness(conv: Conversation):
@@ -447,12 +483,57 @@ async def evaluate_rag(
 
         correctness_results = await asyncio.gather(*[_bounded_correctness(c) for c in correctness_convs])
         all_results.extend(correctness_results)
-        print(f"[RAG Eval] Answer correctness: {len(correctness_results)} results "
-              f"({sum(1 for r in correctness_results if r.passed)} passed)")
+        passed_cor = sum(1 for r in correctness_results if r.passed)
+        print(f"[RAG Eval] Answer correctness: {passed_cor}/{len(correctness_results)} passed "
+              f"(hybrid cosine + LLM judge)")
 
-    gt_count = sum(1 for c in rag_convs if c.persona_id == "ground_truth_stream")
+        # ── Hallucination ─────────────────────────────────────────────────────
+        async def _bounded_hallucination(conv: Conversation):
+            persona = persona_map.get(conv.persona_id)
+            t       = conv.turns[0]
+            async with sem2:
+                return await _run_hallucination(
+                    conv, persona, llm_client,
+                    t.query, t.response, t.expected_answer,
+                )
+
+        hallucination_results = await asyncio.gather(*[_bounded_hallucination(c) for c in correctness_convs])
+        all_results.extend(hallucination_results)
+        passed_hal = sum(1 for r in hallucination_results if r.passed)
+        print(f"[RAG Eval] Hallucination: {passed_hal}/{len(hallucination_results)} passed")
+
+        # ── Completeness ──────────────────────────────────────────────────────
+        async def _bounded_completeness(conv: Conversation):
+            persona = persona_map.get(conv.persona_id)
+            t       = conv.turns[0]
+            async with sem2:
+                return await _run_completeness(
+                    conv, persona, llm_client,
+                    t.query, t.response, t.expected_answer,
+                )
+
+        completeness_results = await asyncio.gather(*[_bounded_completeness(c) for c in correctness_convs])
+        all_results.extend(completeness_results)
+        passed_com = sum(1 for r in completeness_results if r.passed)
+        print(f"[RAG Eval] Completeness: {passed_com}/{len(completeness_results)} passed")
+
+        # ── Factual Consistency ───────────────────────────────────────────────
+        async def _bounded_factual(conv: Conversation):
+            persona = persona_map.get(conv.persona_id)
+            t       = conv.turns[0]
+            async with sem2:
+                return await _run_factual_consistency(
+                    conv, persona, llm_client,
+                    t.query, t.response, t.expected_answer,
+                )
+
+        factual_results = await asyncio.gather(*[_bounded_factual(c) for c in correctness_convs])
+        all_results.extend(factual_results)
+        passed_fac = sum(1 for r in factual_results if r.passed)
+        print(f"[RAG Eval] Factual consistency: {passed_fac}/{len(factual_results)} passed")
+
+    gt_count      = sum(1 for c in rag_convs if c.persona_id == "ground_truth_stream")
     persona_count = len(rag_convs) - gt_count
     print(f"[RAG Eval] Complete — {len(all_results)} metric results "
-          f"({persona_count} persona-based, {gt_count} ground-truth, "
-          f"ground_truth_answers={'yes' if has_gt else 'no'})")
+          f"({persona_count} persona-based, {gt_count} ground-truth)")
     return all_results

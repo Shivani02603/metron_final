@@ -199,10 +199,15 @@ async def run_conversation(
             conversation.goal_achieved = not is_error
             break
 
+        # Security conversations are always single-turn — one probe, one response.
+        # Multi-turn generation for adversarial probes makes expensive LLM calls and
+        # is unnecessary since all attack variants are pre-generated in Stage 2.
+        if is_security:
+            break
+
         # Stop early: last turn reached, or chatbot returned an error/bad field.
-        # Security convs also stop on error (1 turn is enough) but don't mark goal_achieved=False.
         if turn_num >= max_turns or is_error:
-            if is_error and not is_security:
+            if is_error:
                 conversation.goal_achieved = False
             break
 

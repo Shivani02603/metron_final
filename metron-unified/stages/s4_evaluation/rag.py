@@ -387,7 +387,10 @@ async def _run_answer_relevancy(
     try:
         test_case = LLMTestCase(input=query, actual_output=answer)
         metric    = AnswerRelevancyMetric(model=deval_model, threshold=_PASS_THRESHOLD)
-        await loop.run_in_executor(None, metric.measure, test_case)
+        await asyncio.wait_for(
+            loop.run_in_executor(None, metric.measure, test_case),
+            timeout=120,
+        )
         score = float(metric.score or 0.0)
         return MetricResult(
             **base,
@@ -470,6 +473,9 @@ async def evaluate_rag(
     ]
 
     if correctness_convs:
+        # Run all four metric types IN PARALLEL — they are independent of each other.
+        # Previously sequential: correctness → hallucination → completeness → factual
+        # meant each gather had to fully complete before the next started (~4x slower).
         sem2 = asyncio.Semaphore(3)
 
         async def _bounded_correctness(conv: Conversation):
@@ -481,13 +487,6 @@ async def evaluate_rag(
                     t.query, t.response, t.expected_answer,
                 )
 
-        correctness_results = await asyncio.gather(*[_bounded_correctness(c) for c in correctness_convs])
-        all_results.extend(correctness_results)
-        passed_cor = sum(1 for r in correctness_results if r.passed)
-        print(f"[RAG Eval] Answer correctness: {passed_cor}/{len(correctness_results)} passed "
-              f"(hybrid cosine + LLM judge)")
-
-        # ── Hallucination ─────────────────────────────────────────────────────
         async def _bounded_hallucination(conv: Conversation):
             persona = persona_map.get(conv.persona_id)
             t       = conv.turns[0]
@@ -497,12 +496,6 @@ async def evaluate_rag(
                     t.query, t.response, t.expected_answer,
                 )
 
-        hallucination_results = await asyncio.gather(*[_bounded_hallucination(c) for c in correctness_convs])
-        all_results.extend(hallucination_results)
-        passed_hal = sum(1 for r in hallucination_results if r.passed)
-        print(f"[RAG Eval] Hallucination: {passed_hal}/{len(hallucination_results)} passed")
-
-        # ── Completeness ──────────────────────────────────────────────────────
         async def _bounded_completeness(conv: Conversation):
             persona = persona_map.get(conv.persona_id)
             t       = conv.turns[0]
@@ -512,12 +505,6 @@ async def evaluate_rag(
                     t.query, t.response, t.expected_answer,
                 )
 
-        completeness_results = await asyncio.gather(*[_bounded_completeness(c) for c in correctness_convs])
-        all_results.extend(completeness_results)
-        passed_com = sum(1 for r in completeness_results if r.passed)
-        print(f"[RAG Eval] Completeness: {passed_com}/{len(completeness_results)} passed")
-
-        # ── Factual Consistency ───────────────────────────────────────────────
         async def _bounded_factual(conv: Conversation):
             persona = persona_map.get(conv.persona_id)
             t       = conv.turns[0]
@@ -527,9 +514,30 @@ async def evaluate_rag(
                     t.query, t.response, t.expected_answer,
                 )
 
-        factual_results = await asyncio.gather(*[_bounded_factual(c) for c in correctness_convs])
+        (
+            correctness_results,
+            hallucination_results,
+            completeness_results,
+            factual_results,
+        ) = await asyncio.gather(
+            asyncio.gather(*[_bounded_correctness(c)  for c in correctness_convs]),
+            asyncio.gather(*[_bounded_hallucination(c) for c in correctness_convs]),
+            asyncio.gather(*[_bounded_completeness(c)  for c in correctness_convs]),
+            asyncio.gather(*[_bounded_factual(c)       for c in correctness_convs]),
+        )
+
+        all_results.extend(correctness_results)
+        all_results.extend(hallucination_results)
+        all_results.extend(completeness_results)
         all_results.extend(factual_results)
+
+        passed_cor = sum(1 for r in correctness_results if r.passed)
+        passed_hal = sum(1 for r in hallucination_results if r.passed)
+        passed_com = sum(1 for r in completeness_results if r.passed)
         passed_fac = sum(1 for r in factual_results if r.passed)
+        print(f"[RAG Eval] Answer correctness: {passed_cor}/{len(correctness_results)} passed")
+        print(f"[RAG Eval] Hallucination: {passed_hal}/{len(hallucination_results)} passed")
+        print(f"[RAG Eval] Completeness: {passed_com}/{len(completeness_results)} passed")
         print(f"[RAG Eval] Factual consistency: {passed_fac}/{len(factual_results)} passed")
 
     gt_count      = sum(1 for c in rag_convs if c.persona_id == "ground_truth_stream")

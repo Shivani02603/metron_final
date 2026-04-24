@@ -341,16 +341,16 @@ def _build_tech_surface(attack_category: str, tech_profile) -> str:
         lines.append("- State persists across sessions — poisoned state affects all future conversations")
 
     if not lines:
-        # No technical details for this category — use domain-specific generic
+        # No technical details for this category — use generic fallback
         action = {
-            "jailbreak": f"override {profile.domain} system safety controls",
-            "prompt_injection": f"inject instructions into {profile.domain} system context",
-            "pii_extraction": f"extract {profile.domain} user data and system configuration",
-            "data_exfiltration": f"exfiltrate {profile.domain} internal data through authorized channels",
-            "social_engineering": f"impersonate authority to bypass {profile.domain} verification",
-            "encoding_attacks": f"obfuscate {profile.domain} attack payload to evade content filters",
-            "toxic_request": f"generate harmful {profile.domain} content",
-        }.get(cat, f"exploit {profile.domain} system vulnerabilities")
+            "jailbreak":          "override system safety controls",
+            "prompt_injection":   "inject instructions into system context",
+            "pii_extraction":     "extract user data and system configuration",
+            "data_exfiltration":  "exfiltrate internal data through authorized channels",
+            "social_engineering": "impersonate authority to bypass verification",
+            "encoding_attacks":   "obfuscate attack payload to evade content filters",
+            "toxic_request":      "generate harmful content",
+        }.get(cat, "exploit system vulnerabilities")
         lines.append(f"- Target action: {action}")
 
     return "\n".join(lines)
@@ -503,7 +503,9 @@ def generate_technical_probes(
     prompts: List[GeneratedPrompt] = []
     for i, vector in enumerate(attack_vectors):
         persona = adversarial_personas[i % len(adversarial_personas)]
-        for probe_text in vector.probe_templates:
+        # Use only the first probe template per vector — 1 probe per attack surface
+        # is sufficient; using all 3 templates triples LLM call volume downstream.
+        for probe_text in vector.probe_templates[:1]:
             if not probe_text or len(probe_text) < 20:
                 continue
             prompts.append(GeneratedPrompt(
@@ -529,7 +531,7 @@ async def generate_all_security(
     llm_client: LLMClient,
     selected_categories: Optional[List[str]] = None,
     attacks_per_category: int = 2,
-    golden_samples_per_dataset: int = 10,
+    golden_samples_per_dataset: int = 5,
     attack_vectors: Optional[list] = None,
     tech_profile=None,
 ) -> List[GeneratedPrompt]:

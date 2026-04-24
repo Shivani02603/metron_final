@@ -225,8 +225,9 @@ async def evaluate_quality(
         if quality_criteria else THRESHOLDS["quality_pass"]
     )
 
-    sem  = asyncio.Semaphore(5)
+    sem  = asyncio.Semaphore(3)
     loop = asyncio.get_running_loop()   # Fix 20: was get_event_loop()
+    _DEVAL_TIMEOUT = 120  # hard ceiling per GEval call — prevents Azure hang freezing the pipeline
 
     async def _eval_one(conv: Conversation) -> List[MetricResult]:
         if not conv.turns:
@@ -268,10 +269,13 @@ async def evaluate_quality(
         if effective_criteria and getattr(config, "use_geval", True):
             async with sem:
                 try:
-                    geval_result = await loop.run_in_executor(
-                        None, _run_deepeval_geval,
-                        last_turn.query, last_turn.response,
-                        effective_criteria, criteria_weights, deval_model
+                    geval_result = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None, _run_deepeval_geval,
+                            last_turn.query, last_turn.response,
+                            effective_criteria, criteria_weights, deval_model
+                        ),
+                        timeout=_DEVAL_TIMEOUT,
                     )
                     method = geval_result.get("method", "deepeval_geval")
                     for criterion_name, score in geval_result["scores"].items():

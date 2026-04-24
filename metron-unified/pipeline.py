@@ -238,13 +238,55 @@ async def run_pipeline(
         )
 
         # Stage 4: All evaluations in parallel
+        # Each evaluator runs internally throttled (sem=3 per evaluator, timeouts on every
+        # Azure call) so they cannot hang forever. Progress ticks every ~10s so the UI
+        # always shows movement even while evaluation is running.
         _update(job_store, run_id, 58, "Evaluating results (functional + security + quality in parallel)…", "functional")
         _log(job_store, run_id, "phase_start", {"phase": "evaluation", "label": "Evaluating Results"})
-        func_results, sec_results, qual_results = await asyncio.gather(
-            evaluate_functional(conversations, personas, config, llm_client, quality_criteria),
-            evaluate_security(conversations, personas, config, llm_client),
-            evaluate_quality(conversations, personas, config, llm_client, quality_criteria),
-        )
+
+        async def _run_evals_with_progress():
+            """
+            Run three evaluators in parallel with a progress-tick loop.
+
+            Two key rules:
+            1. asyncio.create_task() requires a *coroutine*, not a Future.
+               asyncio.gather() returns a _GatheringFuture — wrapping it in an
+               async def gives create_task a proper coroutine to schedule.
+            2. Each evaluator is isolated: one crashing does not lose the others.
+            """
+            async def _safe(coro, label: str) -> list:
+                try:
+                    return await coro
+                except Exception as exc:
+                    print(f"[Pipeline] {label} evaluation failed (non-fatal): {exc}")
+                    return []
+
+            async def _all_evals():
+                return await asyncio.gather(
+                    _safe(evaluate_functional(conversations, personas, config, llm_client, quality_criteria), "functional"),
+                    _safe(evaluate_security(conversations, personas, config, llm_client),                     "security"),
+                    _safe(evaluate_quality(conversations, personas, config, llm_client, quality_criteria),    "quality"),
+                )
+
+            eval_task = asyncio.create_task(_all_evals())
+            progress = 58
+            progress_labels = [
+                "Scoring functional conversations…",
+                "Running security checks…",
+                "Applying quality criteria…",
+                "Finalising evaluation scores…",
+            ]
+            label_idx = 0
+            while not eval_task.done():
+                await asyncio.sleep(10)
+                if not eval_task.done():
+                    progress = min(progress + 1, 67)
+                    label = progress_labels[min(label_idx, len(progress_labels) - 1)]
+                    label_idx += 1
+                    _update(job_store, run_id, progress, label, "evaluation")
+            return await eval_task
+
+        func_results, sec_results, qual_results = await _run_evals_with_progress()
 
         # ── Stream 2: Ground truth direct evaluation (RAG mode only) ─────────
         # Sends ground truth questions straight to the RAG endpoint with no persona
@@ -272,9 +314,32 @@ async def run_pipeline(
             _update(job_store, run_id, 70, "Running RAG evaluation (faithfulness, recall, precision, answer correctness)…", "rag")
             _log(job_store, run_id, "phase_start", {"phase": "rag", "label": "RAG Evaluation"})
             try:
-                rag_results = await evaluate_rag(all_rag_conversations, personas, config, llm_client)
+                async def _safe_rag():
+                    try:
+                        return await evaluate_rag(all_rag_conversations, personas, config, llm_client)
+                    except Exception as exc:
+                        print(f"[Pipeline] RAG evaluation failed (non-fatal): {exc}")
+                        return []
+
+                rag_task = asyncio.create_task(_safe_rag())
+                rag_progress = 70
+                rag_labels = [
+                    "Scoring answer relevancy…",
+                    "Checking answer correctness…",
+                    "Running hallucination checks…",
+                    "Finalising RAG metrics…",
+                ]
+                rag_label_idx = 0
+                while not rag_task.done():
+                    await asyncio.sleep(10)
+                    if not rag_task.done():
+                        rag_progress = min(rag_progress + 1, 71)
+                        label = rag_labels[min(rag_label_idx, len(rag_labels) - 1)]
+                        rag_label_idx += 1
+                        _update(job_store, run_id, rag_progress, label, "rag")
+                rag_results = await rag_task
             except Exception as rag_err:
-                print(f"[Pipeline] RAG evaluation failed: {rag_err}")
+                print(f"[Pipeline] RAG task setup failed: {rag_err}")
             _update(job_store, run_id, 71, f"RAG: {len(rag_results)} metrics evaluated", "rag",
                     {"count": len(rag_results), "passed": sum(1 for r in rag_results if r.passed)})
 

@@ -442,8 +442,13 @@ async def evaluate_functional(
     # Fix 33: enable_judge toggle
     run_judge = getattr(config, "enable_judge", True)
 
-    sem  = asyncio.Semaphore(5)
+    # sem gates ALL external calls (DeepEval + LLM judge) — max 3 concurrent Azure
+    # calls from functional eval at any time, preventing thread-pool exhaustion and
+    # Azure rate-limit cascades that cause silent multi-minute freezes.
+    sem  = asyncio.Semaphore(3)
     loop = asyncio.get_running_loop()   # Fix 20: was get_event_loop()
+
+    _DEVAL_TIMEOUT = 120  # seconds — hard ceiling per DeepEval call
 
     async def _eval_one(conv: Conversation) -> List[MetricResult]:
         persona  = persona_map.get(conv.persona_id)
@@ -496,9 +501,13 @@ async def evaluate_functional(
                 if context:
                     # Branch 1: RAG — retrieved context chunks as reference
                     try:
-                        hall_score, hall_reason = await loop.run_in_executor(
-                            None, _deepeval_hallucination, query, response, context, deval_model,
-                        )
+                        async with sem:
+                            hall_score, hall_reason = await asyncio.wait_for(
+                                loop.run_in_executor(
+                                    None, _deepeval_hallucination, query, response, context, deval_model,
+                                ),
+                                timeout=_DEVAL_TIMEOUT,
+                            )
                         local.append(MetricResult(
                             **base_meta, metric_name="hallucination",
                             score=hall_score,
@@ -517,9 +526,13 @@ async def evaluate_functional(
                 elif expected and _is_factual_reference(expected):
                     # Branch 2: factual reference document (not a behavioral description)
                     try:
-                        hall_score, hall_reason = await loop.run_in_executor(
-                            None, _deepeval_hallucination, query, response, [expected], deval_model,
-                        )
+                        async with sem:
+                            hall_score, hall_reason = await asyncio.wait_for(
+                                loop.run_in_executor(
+                                    None, _deepeval_hallucination, query, response, [expected], deval_model,
+                                ),
+                                timeout=_DEVAL_TIMEOUT,
+                            )
                         local.append(MetricResult(
                             **base_meta, metric_name="hallucination",
                             score=hall_score,
@@ -542,9 +555,13 @@ async def evaluate_functional(
                     # are not knowledge documents — using them as hallucination references
                     # produces false failures because any valid response diverges from the wording.
                     try:
-                        fact_score, fact_reason = await loop.run_in_executor(
-                            None, _deepeval_geval_factual_accuracy, query, response, domain, deval_model,
-                        )
+                        async with sem:
+                            fact_score, fact_reason = await asyncio.wait_for(
+                                loop.run_in_executor(
+                                    None, _deepeval_geval_factual_accuracy, query, response, domain, deval_model,
+                                ),
+                                timeout=_DEVAL_TIMEOUT,
+                            )
                         local.append(MetricResult(
                             **base_meta, metric_name="geval_factual_accuracy",
                             score=fact_score,
@@ -563,9 +580,13 @@ async def evaluate_functional(
             # ── Answer Relevancy (Fix 18 + Fix 36) ───────────────────────────
             if "answer_relevancy" in active_deval and deval_model:
                 try:
-                    rel_score, rel_reason = await loop.run_in_executor(
-                        None, _deepeval_answer_relevancy, query, response, deval_model,
-                    )
+                    async with sem:
+                        rel_score, rel_reason = await asyncio.wait_for(
+                            loop.run_in_executor(
+                                None, _deepeval_answer_relevancy, query, response, deval_model,
+                            ),
+                            timeout=_DEVAL_TIMEOUT,
+                        )
                     local.append(MetricResult(
                         **base_meta, metric_name="answer_relevancy",
                         score=rel_score,
@@ -595,10 +616,14 @@ async def evaluate_functional(
                 turn_number=last_turn.turn_number,
             )
             try:
-                use_score, use_reason = await loop.run_in_executor(
-                    None, _deepeval_usefulness,
-                    last_turn.query, last_turn.response, deval_model,
-                )
+                async with sem:
+                    use_score, use_reason = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None, _deepeval_usefulness,
+                            last_turn.query, last_turn.response, deval_model,
+                        ),
+                        timeout=_DEVAL_TIMEOUT,
+                    )
                 local.append(MetricResult(
                     **base_last, metric_name="usefulness",
                     score=use_score,

@@ -542,7 +542,15 @@ async def run_pipeline(
 
         def _flat_phase(cls_key: str, results: list) -> dict:
             summary = tc.get(cls_key, {})
+            # Always emit every field the UI expects — when a class has zero
+            # results the summary dict is absent from tc, causing undefined/undefined.
+            non_skipped = [r for r in results if not r.skipped]
             return {
+                "total":    summary.get("total",    len(results)),
+                "passed":   summary.get("passed",   sum(1 for r in non_skipped if r.passed)),
+                "failed":   summary.get("failed",   sum(1 for r in non_skipped if not r.passed)),
+                "skipped":  summary.get("skipped",  len(results) - len(non_skipped)),
+                "avg_score": summary.get("avg_score", 0.0),
                 **summary,
                 "pass_rate": round(summary.get("pass_rate", 0) * 100, 1),
                 "results": [_to_test_result(r) for r in results],

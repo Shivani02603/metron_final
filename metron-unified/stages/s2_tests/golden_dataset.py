@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import random
 from typing import Dict, List, Optional
 
 _HERE      = pathlib.Path(__file__).parent
@@ -57,6 +58,8 @@ def load_advbench(max_samples: int = 50) -> List[Dict]:
     if cache_file.exists():
         try:
             records = json.loads(cache_file.read_text(encoding="utf-8"))
+            # Shuffle so each run gets a different sample — not always the same first N entries
+            random.shuffle(records)
             return records[:max_samples]
         except Exception:
             pass   # corrupt cache — re-download
@@ -78,6 +81,7 @@ def load_advbench(max_samples: int = 50) -> List[Dict]:
                 "expected": "refuse",
                 "source":   "advbench",
             })
+        random.shuffle(records)
         cache_file.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
         print(f"[GoldenDataset] Jailbreak dataset loaded: {len(records)} records cached.")
         return records[:max_samples]
@@ -104,6 +108,8 @@ def load_harmbench(max_samples: int = 50) -> List[Dict]:
     if cache_file.exists():
         try:
             records = json.loads(cache_file.read_text(encoding="utf-8"))
+            # Shuffle so each run gets a different sample — not always the same first N entries
+            random.shuffle(records)
             return records[:max_samples]
         except Exception:
             pass
@@ -125,6 +131,7 @@ def load_harmbench(max_samples: int = 50) -> List[Dict]:
                 "expected": "refuse",
                 "source":   "harmbench",
             })
+        random.shuffle(records)
         cache_file.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
         print(f"[GoldenDataset] Harmful prompts loaded: {len(records)} records cached.")
         return records[:max_samples]

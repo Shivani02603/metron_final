@@ -57,6 +57,9 @@ interface TestResult {
   passed: boolean;
   reasoning: string;
   latency_ms: number;
+  failure_taxonomy_id?: string;
+  failure_taxonomy_label?: string;
+  failure_reason?: string;
   details: Record<string, unknown>;
 }
 
@@ -96,6 +99,29 @@ interface LoadMetrics {
   tool_used: string;
 }
 
+interface RCAFinding {
+  rank: number;
+  id: string;
+  label: string;
+  reason?: string;
+  category: string;
+  category_id: string;
+  probability: number;
+  affected_count: number;
+  evidence: string[];
+  remediation: string;
+}
+
+interface RCAReport {
+  total_failed: number;
+  total_analyzed: number;
+  relevant_points: number;
+  filtered_points: number;
+  architecture_summary: Record<string, unknown>;
+  signal_summary: Record<string, number>;
+  top_causes: RCAFinding[];
+}
+
 interface FullResults {
   run_id: string;
   health_score: number;
@@ -109,6 +135,7 @@ interface FullResults {
   rag?: PhaseSummary;
   performance: PerformanceMetrics;
   load: LoadMetrics;
+  rca?: RCAReport;
   personas: Array<{ id: string; name: string; description: string; traits: string[] }>;
   persona_breakdown: Array<{
     persona_id: string;
@@ -179,6 +206,7 @@ export default function ResultsPage() {
       "Suite", "Metric / Test", "Category",
       "Prompt (Input)", "AI Response (Output)",
       "Score", "Passed", "Reasoning", "Latency (ms)",
+      "Taxonomy ID", "Taxonomy Label", "Failure Reason",
     ];
 
     const toRows = (suite: string, items: TestResult[] = []) =>
@@ -192,6 +220,9 @@ export default function ResultsPage() {
         r.passed ? "PASS" : "FAIL",
         escape(r.reasoning || ""),
         r.latency_ms?.toFixed(0) ?? "",
+        escape(r.failure_taxonomy_id || ""),
+        escape(r.failure_taxonomy_label || ""),
+        escape(r.failure_reason || ""),
       ]);
 
     const rows = [
@@ -210,13 +241,17 @@ export default function ResultsPage() {
 
   const downloadCSV = () => {
     if (!results?.functional?.results) return;
-    const headers = ["Test ID", "Name", "Category", "Score", "Passed", "Latency(ms)", "Input", "Output"];
+    const headers = ["Test ID", "Name", "Category", "Score", "Passed", "Latency(ms)", "Input", "Output", "Taxonomy ID", "Taxonomy Label", "Failure Reason"];
+    const escape = (s: string) => `"${String(s ?? "").replace(/"/g, '""')}"`;
     const rows = results.functional.results.map((r) => [
       r.test_id, r.test_name, r.category,
       r.score.toFixed(3), r.passed ? "true" : "false",
       r.latency_ms.toFixed(0),
-      `"${r.input_text.slice(0, 100).replace(/"/g, '""')}"`,
-      `"${r.output_text.slice(0, 200).replace(/"/g, '""')}"`,
+      escape(r.input_text.slice(0, 100)),
+      escape(r.output_text.slice(0, 200)),
+      escape(r.failure_taxonomy_id || ""),
+      escape(r.failure_taxonomy_label || ""),
+      escape(r.failure_reason || ""),
     ]);
     const csv = [headers, ...rows].map((r) => r.join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
@@ -238,6 +273,27 @@ export default function ResultsPage() {
   const downloadMarkdown = () => {
     if (!results) return;
     const r = results;
+
+    const rcaSection = r.rca ? `
+## Root Cause Analysis
+> Analysed ${r.rca.total_analyzed} results · ${r.rca.total_failed} failures · ${r.rca.relevant_points} relevant failure points (${r.rca.filtered_points} excluded by architecture filter)
+
+### Observed Signals
+${Object.entries(r.rca.signal_summary).map(([k, v]) => `- ${k.replace(/_/g, " ")}: ${v}`).join("\n")}
+
+### Top Probable Root Causes
+${r.rca.top_causes.map(c => {
+  const pct = Math.round(c.probability * 100);
+  const level = pct >= 70 ? "🔴 HIGH" : pct >= 45 ? "🟠 MEDIUM" : "🔵 LOW";
+  return `#### #${c.rank} [${c.id}] ${c.label}
+- **Category:** ${c.category}
+- **Probability:** ${pct}% ${level}
+- **Affected:** ${c.affected_count} prompt(s)
+- **Evidence:** ${c.evidence.slice(0, 2).join("; ")}
+- **Fix:** ${c.remediation}`;
+}).join("\n\n")}
+` : "";
+
     const md = `# METRON QA Report
 Generated: ${new Date().toLocaleString()}
 Agent: ${r.agent_name || "—"} | Domain: ${r.domain}
@@ -260,7 +316,7 @@ Health Score: ${(r.health_score * 100).toFixed(1)}% | ${r.passed ? "PASSED" : "F
 - Concurrent Users: ${r.load?.concurrent_users ?? 0}
 - Throughput: ${(r.load?.requests_per_second ?? 0).toFixed(2)} req/s
 - Error Rate: ${(r.load?.error_rate ?? 0).toFixed(1)}%
-`;
+${rcaSection}`;
     const blob = new Blob([md], { type: "text/markdown" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
@@ -295,7 +351,9 @@ Health Score: ${(r.health_score * 100).toFixed(1)}% | ${r.passed ? "PASSED" : "F
   const TABS = [
     "Functional", "Security", "Quality",
     ...(results.rag ? ["RAG"] : []),
-    "Performance", "Load Test", "Export",
+    "Performance", "Load Test",
+    ...(results.rca ? ["RCA"] : []),
+    "Export",
   ];
 
   return (
@@ -369,12 +427,17 @@ Health Score: ${(r.health_score * 100).toFixed(1)}% | ${r.passed ? "PASSED" : "F
           {/* ── Tab 3: RAG (only present in RAG mode) ── */}
           {results.rag && activeTab === 3 && <RAGTab data={results.rag} />}
 
-          {/* ── Performance / Load / Export shift index when RAG tab is present ── */}
-          {activeTab === (results.rag ? 4 : 3) && <PerformanceTab data={results.performance} />}
-          {activeTab === (results.rag ? 5 : 4) && <LoadTab data={results.load} />}
-
-          {/* ── Export ── */}
-          {activeTab === (results.rag ? 6 : 5) && (
+          {/* ── Performance / Load / RCA / Export — indices shift with optional RAG tab ── */}
+          {(() => {
+            const base = results.rag ? 4 : 3;
+            const rcaIdx   = results.rca ? base + 2 : -1;
+            const exportIdx = results.rca ? base + 3 : base + 2;
+            return (
+              <>
+                {activeTab === base     && <PerformanceTab data={results.performance} />}
+                {activeTab === base + 1 && <LoadTab data={results.load} />}
+                {results.rca && activeTab === rcaIdx && <RCATab data={results.rca} />}
+                {activeTab === exportIdx && (
             <div className="space-y-4">
               <p className="text-sm text-[var(--color-on-surface-variant)] opacity-70">Download the test results in various formats.</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -412,7 +475,10 @@ Health Score: ${(r.health_score * 100).toFixed(1)}% | ${r.passed ? "PASSED" : "F
                 />
               </div>
             </div>
-          )}
+                )}
+              </>
+            );
+          })()}
         </div>
       </div>
 
@@ -621,6 +687,20 @@ function SecurityTab({ data }: { data: PhaseSummary }) {
                     {r.reasoning && (
                       <p className="text-xs text-[var(--color-on-surface-variant)] pl-8 leading-relaxed">{r.reasoning}</p>
                     )}
+                    {!r.passed && r.failure_reason && (
+                      <div className="p-3 rounded-lg border border-[#6200ee]/20 bg-[#6200ee]/5 space-y-1.5">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="material-symbols-outlined text-xs text-[#6200ee]">travel_explore</span>
+                          <p className="text-[10px] font-black uppercase tracking-wider text-[#6200ee]">Root Cause</p>
+                          {r.failure_taxonomy_id && r.failure_taxonomy_label && (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#ede7f6] text-[#6200ee]">
+                              {r.failure_taxonomy_id} · {r.failure_taxonomy_label}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-[var(--color-on-surface-variant)] leading-relaxed">{r.failure_reason}</p>
+                      </div>
+                    )}
                     <ConversationBlock
                       input={r.input_text}
                       output={r.output_text}
@@ -684,6 +764,20 @@ function QualityTab({ data }: { data: PhaseSummary }) {
                 <div className="p-3 rounded-lg bg-[var(--color-surface-container-low)]">
                   <p className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-on-surface-variant)] opacity-60 mb-1">Evaluation</p>
                   <p className="text-xs">{r.reasoning}</p>
+                </div>
+              )}
+              {!r.passed && r.failure_reason && (
+                <div className="p-3 rounded-lg border border-[#6200ee]/20 bg-[#6200ee]/5 space-y-1.5">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="material-symbols-outlined text-xs text-[#6200ee]">travel_explore</span>
+                    <p className="text-[10px] font-black uppercase tracking-wider text-[#6200ee]">Root Cause</p>
+                    {r.failure_taxonomy_id && r.failure_taxonomy_label && (
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#ede7f6] text-[#6200ee]">
+                        {r.failure_taxonomy_id} · {r.failure_taxonomy_label}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-[var(--color-on-surface-variant)] leading-relaxed">{r.failure_reason}</p>
                 </div>
               )}
               {/* Metric breakdown from details */}
@@ -796,10 +890,152 @@ function RAGTab({ data }: { data: PhaseSummary }) {
                     <p className="text-xs">{r.reasoning}</p>
                   </div>
                 )}
+                {!r.passed && r.failure_reason && (
+                  <div className="p-3 rounded-lg border border-[#6200ee]/20 bg-[#6200ee]/5 space-y-1.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="material-symbols-outlined text-xs text-[#6200ee]">travel_explore</span>
+                      <p className="text-[10px] font-black uppercase tracking-wider text-[#6200ee]">Root Cause</p>
+                      {r.failure_taxonomy_id && r.failure_taxonomy_label && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#ede7f6] text-[#6200ee]">
+                          {r.failure_taxonomy_id} · {r.failure_taxonomy_label}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-[var(--color-on-surface-variant)] leading-relaxed">{r.failure_reason}</p>
+                  </div>
+                )}
               </div>
             )}
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────── RCA Tab ──────────────────────────────────────────
+function RCATab({ data }: { data: RCAReport }) {
+  if (!data?.top_causes?.length) return <EmptyState />;
+
+  const CAT_COLORS: Record<string, { bg: string; text: string }> = {
+    C1: { bg: "bg-purple-100",  text: "text-purple-700"  },
+    C2: { bg: "bg-blue-100",    text: "text-blue-700"    },
+    C3: { bg: "bg-orange-100",  text: "text-orange-700"  },
+    C4: { bg: "bg-red-100",     text: "text-red-700"     },
+    C5: { bg: "bg-green-100",   text: "text-green-700"   },
+    C6: { bg: "bg-yellow-100",  text: "text-yellow-700"  },
+    C7: { bg: "bg-fuchsia-100", text: "text-fuchsia-700" },
+    C8: { bg: "bg-slate-100",   text: "text-slate-700"   },
+  };
+
+  const arch = data.architecture_summary as Record<string, unknown>;
+
+  return (
+    <div className="space-y-6">
+      {/* Summary stats */}
+      <SummaryRow4
+        items={[
+          { label: "Failures Mapped",    value: data.total_failed },
+          { label: "Results Analysed",   value: data.total_analyzed },
+          { label: "Relevant FP",        value: data.relevant_points },
+          { label: "Filtered Out",       value: data.filtered_points },
+        ]}
+      />
+
+      {/* Architecture profile */}
+      <div className="p-4 rounded-xl bg-[var(--color-surface-container-low)] space-y-2">
+        <p className="text-[10px] font-black uppercase tracking-widest text-[var(--color-on-surface-variant)] opacity-60">Architecture Profile Used</p>
+        <div className="flex flex-wrap gap-2">
+          {[
+            ["App Type",        arch.application_type as string],
+            ["Deployment",      arch.deployment_type as string],
+            ["Vector DB",       (arch.vector_db as string) || "none"],
+            ["Session DB",      (arch.session_db as string) || "none"],
+            ["Rate Limiting",   arch.has_rate_limiting ? "yes" : "no"],
+            ["Retry Logic",     arch.has_retry_logic ? "yes" : "no"],
+            ["Circuit Breaker", arch.has_circuit_breaker ? "yes" : "no"],
+          ].map(([label, val]) => {
+            const ok = !["no","none","unknown"].includes(String(val).toLowerCase());
+            return (
+              <span key={label} className={`text-[11px] font-semibold px-2.5 py-1 rounded-full ${ok ? "bg-secondary/10 text-secondary" : "bg-error/10 text-error"}`}>
+                {label}: {val}
+              </span>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Observed signals */}
+      {Object.keys(data.signal_summary).length > 0 && (
+        <div className="p-4 rounded-xl bg-[var(--color-surface-container-low)] space-y-2">
+          <p className="text-[10px] font-black uppercase tracking-widest text-[var(--color-on-surface-variant)] opacity-60">Observed Failure Signals</p>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(data.signal_summary)
+              .sort(([, a], [, b]) => b - a)
+              .map(([key, count]) => (
+                <span key={key} className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-[#855300]/10 text-[#855300]">
+                  {key.replace(/_/g, " ")} ({count})
+                </span>
+              ))}
+          </div>
+        </div>
+      )}
+
+      {/* Root cause cards */}
+      <div className="space-y-3">
+        <p className="text-[10px] font-black uppercase tracking-widest text-[var(--color-on-surface-variant)] opacity-60">Top Probable Root Causes</p>
+        {data.top_causes.map((cause) => {
+          const pct = Math.round(cause.probability * 100);
+          const isHigh   = pct >= 70;
+          const isMedium = pct >= 45 && pct < 70;
+          const probColor = isHigh ? "text-error" : isMedium ? "text-[#855300]" : "text-primary";
+          const probBg    = isHigh ? "bg-error/10" : isMedium ? "bg-[#855300]/10" : "bg-primary/10";
+          const probLabel = isHigh ? "HIGH" : isMedium ? "MEDIUM" : "LOW";
+          const cat = CAT_COLORS[cause.category_id] ?? { bg: "bg-slate-100", text: "text-slate-700" };
+
+          return (
+            <div key={cause.id} className="border border-[var(--color-outline-variant)] rounded-xl p-4">
+              <div className="flex items-start gap-3">
+                {/* Left: details */}
+                <div className="flex-1 min-w-0 space-y-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-black text-[var(--color-on-surface-variant)] opacity-50">#{cause.rank}</span>
+                    <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${cat.bg} ${cat.text}`}>{cause.category}</span>
+                    <span className="text-[10px] font-mono text-[var(--color-on-surface-variant)] opacity-50">{cause.id}</span>
+                  </div>
+                  <p className="text-sm font-black text-[var(--color-on-surface)]">{cause.label}</p>
+
+                  {cause.evidence.slice(0, 3).map((e, i) => (
+                    <div key={i} className="flex items-start gap-1.5">
+                      <span className="material-symbols-outlined text-xs text-[#855300] mt-0.5 flex-shrink-0">arrow_right</span>
+                      <p className="text-xs text-[var(--color-on-surface-variant)]">{e}</p>
+                    </div>
+                  ))}
+
+                  {cause.reason && (
+                    <div className="p-2.5 rounded-lg bg-[var(--color-surface-container-low)] border-l-2 border-[var(--color-outline-variant)]">
+                      <p className="text-xs text-[var(--color-on-surface-variant)] leading-relaxed">{cause.reason}</p>
+                    </div>
+                  )}
+
+                  <div className="flex items-start gap-1.5 p-2 rounded-lg bg-secondary/5 border border-secondary/20">
+                    <span className="material-symbols-outlined text-xs text-secondary mt-0.5 flex-shrink-0">build</span>
+                    <p className="text-xs text-secondary font-medium">{cause.remediation}</p>
+                  </div>
+                </div>
+
+                {/* Right: probability */}
+                <div className={`flex-shrink-0 flex flex-col items-center gap-1 px-3 py-2 rounded-xl ${probBg}`}>
+                  <span className={`font-headline text-2xl font-black ${probColor}`}>{pct}%</span>
+                  <span className={`text-[9px] font-black tracking-widest ${probColor}`}>{probLabel}</span>
+                  <div className="w-12 h-1.5 bg-[var(--color-outline-variant)] rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${isHigh ? "bg-error" : isMedium ? "bg-[#855300]" : "bg-primary"}`} style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -920,6 +1156,20 @@ function TestResultRow({ result }: { result: TestResult }) {
           <ConversationBlock input={result.input_text} output={result.output_text} />
           {result.reasoning && (
             <p className="text-xs text-[var(--color-on-surface-variant)] italic">{result.reasoning}</p>
+          )}
+          {!result.passed && result.failure_reason && (
+            <div className="p-3 rounded-lg border border-[#6200ee]/20 bg-[#6200ee]/5 space-y-1.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="material-symbols-outlined text-xs text-[#6200ee]">travel_explore</span>
+                <p className="text-[10px] font-black uppercase tracking-wider text-[#6200ee]">Root Cause</p>
+                {result.failure_taxonomy_id && result.failure_taxonomy_label && (
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#ede7f6] text-[#6200ee]">
+                    {result.failure_taxonomy_id} · {result.failure_taxonomy_label}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-[var(--color-on-surface-variant)] leading-relaxed">{result.failure_reason}</p>
+            </div>
           )}
         </div>
       )}

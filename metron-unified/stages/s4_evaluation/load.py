@@ -23,34 +23,40 @@ from pathlib import Path
 from typing import Any, Dict
 from urllib.parse import urlparse
 
+from core.config import THRESHOLDS
 from core.models import RunConfig
 
-LOAD_TEST_PROMPTS = [
-    "Hello, can you help me?",
-    "What are your capabilities?",
-    "I need assistance with a task.",
-    "Can you explain your main features?",
-    "How do you handle complex or unusual requests?",
-]
+# Import domain-aware prompt generator shared with performance.py
+from stages.s4_evaluation.performance import _get_performance_prompts, _GENERIC_PERFORMANCE_PROMPTS
+
+# Keep a short alias for the generic set (used as the bare fallback in preflight)
+LOAD_TEST_PROMPTS = _GENERIC_PERFORMANCE_PROMPTS
 
 # ── Locust file template ───────────────────────────────────────────────────────
 # Values are injected via json.dumps for safe string encoding.
+# When _REQUEST_TEMPLATE is non-empty, it is rendered per-request with {{query}}
+# and {{uuid}} substituted; {{conversation_id}} also gets a fresh UUID per request
+# (load test has no multi-turn sessions, so each request is its own conversation).
 
 _LOCUST_FILE_TEMPLATE = textwrap.dedent("""\
     import json
     import random
+    import uuid as _uuid_mod
     from locust import HttpUser, task, between
 
-    _PROMPTS        = {prompts_json}
-    _REQUEST_FIELD  = {request_field_json}
-    _RESPONSE_FIELD = {response_field_json}
-    _AUTH_TYPE      = {auth_type_json}
-    _AUTH_TOKEN     = {auth_token_json}
-    _PATH           = {path_json}
+    _PROMPTS           = {prompts_json}
+    _REQUEST_FIELD     = {request_field_json}
+    _RESPONSE_FIELD    = {response_field_json}
+    _AUTH_TYPE         = {auth_type_json}
+    _AUTH_TOKEN        = {auth_token_json}
+    _PATH              = {path_json}
+    _REQUEST_TEMPLATE  = {request_template_json}
+    _TRIM_MARKER       = {trim_marker_json}
 
 
     class AIEndpointUser(HttpUser):
-        wait_time = between(1.0, 3.0)
+        # Fix 26: tighter wait window gets more requests into the test window
+        wait_time = between(0.5, 1.5)
 
         def on_start(self):
             if _AUTH_TYPE == "bearer" and _AUTH_TOKEN:
@@ -58,15 +64,41 @@ _LOCUST_FILE_TEMPLATE = textwrap.dedent("""\
 
         @task
         def send_request(self):
-            prompt  = random.choice(_PROMPTS)
-            payload = {{_REQUEST_FIELD: prompt}}
+            prompt = random.choice(_PROMPTS)
+            if _REQUEST_TEMPLATE:
+                body_str = (
+                    _REQUEST_TEMPLATE
+                    .replace("{{{{query}}}}", prompt)
+                    .replace("{{{{uuid}}}}", str(_uuid_mod.uuid4()))
+                    .replace("{{{{conversation_id}}}}", str(_uuid_mod.uuid4()))
+                )
+                payload = json.loads(body_str)
+            else:
+                payload = {{_REQUEST_FIELD: prompt}}
             with self.client.post(
                 _PATH, json=payload, catch_response=True, name="AI Endpoint"
             ) as response:
                 if response.status_code == 200:
                     try:
                         data = response.json()
-                        if _RESPONSE_FIELD in data:
+                        # Traverse full dot-notation path (not just first segment)
+                        _parts = _RESPONSE_FIELD.split(".") if _RESPONSE_FIELD else []
+                        _obj = data
+                        _valid = True
+                        for _part in _parts:
+                            if isinstance(_obj, dict) and _part in _obj:
+                                _obj = _obj[_part]
+                            elif isinstance(_obj, list) and _part.isdigit():
+                                _idx = int(_part)
+                                if 0 <= _idx < len(_obj):
+                                    _obj = _obj[_idx]
+                                else:
+                                    _valid = False
+                                    break
+                            else:
+                                _valid = False
+                                break
+                        if _valid or not _RESPONSE_FIELD:
                             response.success()
                         else:
                             response.failure(
@@ -88,13 +120,16 @@ def _build_locust_file(config: RunConfig, path: str) -> str:
     host     = f"{parsed.scheme}://{parsed.netloc}"
     endpoint = parsed.path or "/"
 
+    domain_prompts = _get_performance_prompts(config)
     content = _LOCUST_FILE_TEMPLATE.format(
-        prompts_json       = json.dumps(LOAD_TEST_PROMPTS),
-        request_field_json = json.dumps(config.request_field),
-        response_field_json= json.dumps(config.response_field),
-        auth_type_json     = json.dumps(config.auth_type),
-        auth_token_json    = json.dumps(config.auth_token),
-        path_json          = json.dumps(endpoint),
+        prompts_json          = json.dumps(domain_prompts),
+        request_field_json    = json.dumps(config.request_field),
+        response_field_json   = json.dumps(config.response_field),
+        auth_type_json        = json.dumps(config.auth_type),
+        auth_token_json       = json.dumps(config.auth_token),
+        path_json             = json.dumps(endpoint),
+        request_template_json = json.dumps(getattr(config, "request_template", None) or ""),
+        trim_marker_json      = json.dumps(getattr(config, "response_trim_marker", None) or ""),
     )
     Path(path).write_text(content, encoding="utf-8")
     return host
@@ -121,6 +156,7 @@ def _parse_locust_csv(csv_prefix: str) -> Dict[str, Any]:
                 rps       = float(row.get("Requests/s", 0) or 0)
                 error_rate = round(failures / total * 100, 2) if total > 0 else 0.0
 
+                _lat_cap = THRESHOLDS["performance_latency_ms"]
                 return {
                     "tool_used":           "locust",
                     "total_requests":      total,
@@ -131,7 +167,7 @@ def _parse_locust_csv(csv_prefix: str) -> Dict[str, Any]:
                     "p95_latency_ms":      round(p95_ms, 2),
                     "p99_latency_ms":      round(p99_ms, 2),
                     "requests_per_second": round(rps, 3),
-                    "passed": p95_ms <= 5000 and error_rate < 5.0,
+                    "passed": p95_ms <= _lat_cap and error_rate < 5.0,
                     "assessment":          _assess_load(error_rate / 100, p95_ms),
                 }
 
@@ -139,9 +175,10 @@ def _parse_locust_csv(csv_prefix: str) -> Dict[str, Any]:
 
 
 def _assess_load(error_rate: float, p95_ms: float) -> str:
-    if error_rate < 0.01 and p95_ms < 2000:
+    lat_cap = THRESHOLDS["performance_latency_ms"]
+    if error_rate < 0.01 and p95_ms < lat_cap * 0.4:
         return "excellent"
-    if error_rate < 0.05 and p95_ms < 5000:
+    if error_rate < 0.05 and p95_ms < lat_cap:
         return "acceptable"
     if error_rate < 0.10:
         return "degraded"
@@ -159,7 +196,20 @@ async def _preflight_check(config: RunConfig) -> None:
     Does NOT raise — Locust still runs even if preflight fails.
     """
     try:
-        payload  = json.dumps({config.request_field: LOAD_TEST_PROMPTS[0]}).encode()
+        import uuid as _uuid_mod
+        request_template = getattr(config, "request_template", None)
+        domain_prompts = _get_performance_prompts(config)
+        test_prompt    = domain_prompts[0]
+        if request_template:
+            body_str = (
+                request_template
+                .replace("{{query}}", test_prompt)
+                .replace("{{uuid}}", str(_uuid_mod.uuid4()))
+                .replace("{{conversation_id}}", str(_uuid_mod.uuid4()))
+            )
+            payload = body_str.encode()
+        else:
+            payload = json.dumps({config.request_field: test_prompt}).encode()
         headers  = {"Content-Type": "application/json"}
         if config.auth_type == "bearer" and config.auth_token:
             headers["Authorization"] = f"Bearer {config.auth_token}"
@@ -230,8 +280,11 @@ async def evaluate_load(config: RunConfig) -> Dict[str, Any]:
 
         host = _build_locust_file(config, locust_file)
 
-        # Gradual spawn: ramp up 1/5th of users per second (spreads load, avoids thundering herd)
-        spawn_rate = max(1, num_users // 5)
+        # Fix 26: ramp-up completes within 20% of test duration (max) to preserve test time.
+        # Old formula: num_users // 5 → with 5 users gives spawn_rate=1, wastes 5s of a 30s test.
+        # New formula: ramp_time_budget = 20% of duration, spawn_rate = users / budget.
+        ramp_time_budget = max(5.0, duration_s * 0.2)
+        spawn_rate = max(1, int(num_users / ramp_time_budget))
 
         cmd = [
             sys.executable, "-m", "locust",
@@ -254,7 +307,7 @@ async def evaluate_load(config: RunConfig) -> Dict[str, Any]:
         # asyncio.create_subprocess_exec requires ProactorEventLoop on Windows but uvicorn
         # uses SelectorEventLoop — this causes silent failures. subprocess.run in an
         # executor works on all platforms without event-loop compatibility issues.
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _run_locust():
             return subprocess.run(

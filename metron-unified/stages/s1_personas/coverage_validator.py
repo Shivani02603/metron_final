@@ -90,5 +90,6 @@ async def validate_and_fill(
                    s["intent"] in [i.value for i in PersonaIntent]:
                     valid.append(s)
         return valid
-    except Exception:
+    except Exception as e:
+        print(f"[CoverageValidator] Coverage validation failed — no additional slots will be added. Error: {e}")
         return []

@@ -8,7 +8,17 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
+
+# Per-run locks prevent concurrent pipeline stages from overwriting each other's
+# job_store state when multiple runs execute simultaneously.
+_job_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _get_lock(run_id: str) -> asyncio.Lock:
+    if run_id not in _job_locks:
+        _job_locks[run_id] = asyncio.Lock()
+    return _job_locks[run_id]
 
 from core.llm_client import LLMClient
 from core.models import (
@@ -18,13 +28,15 @@ from core.models import (
 
 # Stage imports
 from stages.s0_profile.document_parser import parse_document, build_profile_from_config
+from stages.s0_profile.technical_extractor import extract_technical_profile
+from core.attack_surface_mapper import map_attack_surface
 from stages.s1_personas.fishbone_builder import build_slots
 from stages.s1_personas.persona_builder import build_all_personas, build_persona
 from stages.s1_personas.coverage_validator import validate_and_fill
 from stages.s2_tests.functional_gen import generate_all_functional, generate_performance_prompts
 from stages.s2_tests.security_gen import generate_all_security
 from stages.s2_tests.quality_criteria import generate_quality_criteria
-from stages.s3_execution.conversation_runner import run_all_conversations
+from stages.s3_execution.conversation_runner import run_all_conversations, run_ground_truth_conversations
 from stages.s4_evaluation.functional import evaluate_functional
 from stages.s4_evaluation.security import evaluate_security
 from stages.s4_evaluation.quality import evaluate_quality
@@ -32,8 +44,9 @@ from stages.s4_evaluation.performance import evaluate_performance
 from stages.s4_evaluation.load import evaluate_load
 from stages.s4_evaluation.rag import evaluate_rag
 from stages.s5_aggregation.aggregator import aggregate
-from stages.s6_feedback.feedback_loop import run_feedback_loop
 from stages.s7_report.report_generator import report_to_json, generate_html_report
+from stages.s8_rca.rca_mapper import run_rca
+from stages.s8_rca.prompt_classifier import classify_prompt_failures
 
 
 # ── Progress helpers ───────────────────────────────────────────────────────
@@ -49,12 +62,12 @@ def _log(job_store: Dict, run_id: str, event_type: str, content: Dict):
     })
 
 
-def _update(job_store: Dict, run_id: str, progress: int, message: str, phase: str = "", phase_data: Dict = {}):
+def _update(job_store: Dict, run_id: str, progress: int, message: str, phase: str = "", phase_data: Optional[Dict] = None):
     if run_id in job_store:
         job_store[run_id]["progress"]      = progress
         job_store[run_id]["message"]       = message
         job_store[run_id]["current_phase"] = phase
-        if phase_data:
+        if phase_data is not None:
             job_store[run_id]["phase_results"][phase] = phase_data
 
 
@@ -97,16 +110,34 @@ async def run_pipeline(
                 project_id=project_id,
             )
 
+        # ── Stage 0b: Technical Profile Extraction ────────────────────────
+        # Second LLM pass: extracts 24-category technical attack surface from
+        # the seed document. Used to generate stack-specific red-team probes.
+        # Runs only when a document is provided; pipeline continues if it fails.
+        tech_profile = None
+        attack_vectors = []
+        if doc_text.strip():
+            _update(job_store, run_id, 7, "Extracting technical attack surface…", "profiling")
+            tech_profile = await extract_technical_profile(doc_text, llm_client)
+            attack_vectors = map_attack_surface(tech_profile)
+            _log(job_store, run_id, "technical_profile", {
+                "vectors_found": len(attack_vectors),
+                "summary": tech_profile.extraction_summary[:200] if tech_profile.extraction_summary else "",
+                "authorized_actions": tech_profile.authorized_actions[:5],
+                "output_destinations": tech_profile.output_destinations[:3],
+                "compliance_frameworks": tech_profile.compliance_frameworks,
+            })
+
         # ── Stage 1: Persona Generation (Fishbone) ─────────────────────────
         _update(job_store, run_id, 10, "Building persona coverage matrix…", "personas")
         _log(job_store, run_id, "phase_start", {"phase": "personas", "label": "Persona Generation"})
         slots = build_slots(profile, num_personas=config.num_personas)
-        personas = await build_all_personas(slots, profile, llm_client, project_id)
+        personas = await build_all_personas(slots, profile, llm_client, project_id, tech_profile)
 
         # Coverage validation (adds up to 3 more slots if gaps found)
         extra_slots = await validate_and_fill(personas, profile, llm_client)
         if extra_slots:
-            extra_personas = await build_all_personas(extra_slots, profile, llm_client, project_id)
+            extra_personas = await build_all_personas(extra_slots, profile, llm_client, project_id, tech_profile)
             personas.extend(extra_personas)
 
         # Emit one event per persona
@@ -127,19 +158,22 @@ async def run_pipeline(
         _update(job_store, run_id, 20, "Generating domain-specific test prompts…", "test_gen")
         _log(job_store, run_id, "phase_start", {"phase": "test_gen", "label": "Test Generation"})
 
-        # 2a: Functional prompts — RAG mode uses ground truth Q&A pairs if provided
+        # 2a: Functional prompts — always LLM-generated, grounded in rag_text for RAG mode.
+        # Ground truth Q&A pairs are handled separately in Stream 2 (after Stage 3).
         rag_text = config.rag_text if config.is_rag else ""
         func_prompts = await generate_all_functional(
             personas, profile, llm_client,
             rag_text=rag_text,
-            ground_truth=config.ground_truth if config.is_rag else [],
+            max_prompts=config.num_scenarios or 0,   # Fix 35: wire UI num_scenarios cap
         )
 
-        # 2b: Security prompts (adversarial personas only)
+        # 2b: Security prompts (adversarial personas only) + technical probes
         sec_prompts = await generate_all_security(
             personas, profile, llm_client,
             selected_categories=config.selected_attacks,
             attacks_per_category=config.attacks_per_category,
+            attack_vectors=attack_vectors,
+            tech_profile=tech_profile,
         )
 
         # 2c: Quality criteria
@@ -180,13 +214,11 @@ async def run_pipeline(
         _log(job_store, run_id, "phase_start", {"phase": "execution", "label": "Running Conversations"})
 
         # Progress callback for live updates — emits conversation feed events
-        completed_convs: List[Conversation] = []
         def on_conv(done: int, total: int, conv: Conversation):
             progress = 28 + int((done / total) * 30)   # 28-58%
             phase = conv.test_class.value
             _update(job_store, run_id, progress,
                     f"Executing {phase} test {done}/{total}…", "execution")
-            completed_convs.append(conv)
             # Emit every conversation so user sees live Q&A
             last_turn = conv.turns[-1] if conv.turns else None
             _log(job_store, run_id, "conversation", {
@@ -206,23 +238,108 @@ async def run_pipeline(
         )
 
         # Stage 4: All evaluations in parallel
+        # Each evaluator runs internally throttled (sem=3 per evaluator, timeouts on every
+        # Azure call) so they cannot hang forever. Progress ticks every ~10s so the UI
+        # always shows movement even while evaluation is running.
         _update(job_store, run_id, 58, "Evaluating results (functional + security + quality in parallel)…", "functional")
         _log(job_store, run_id, "phase_start", {"phase": "evaluation", "label": "Evaluating Results"})
-        func_results, sec_results, qual_results = await asyncio.gather(
-            evaluate_functional(conversations, personas, config, llm_client, quality_criteria),
-            evaluate_security(conversations, personas, config, llm_client),
-            evaluate_quality(conversations, personas, config, llm_client, quality_criteria),
-        )
 
-        # RAG evaluation (only in RAG mode)
+        async def _run_evals_with_progress():
+            """
+            Run three evaluators in parallel with a progress-tick loop.
+
+            Two key rules:
+            1. asyncio.create_task() requires a *coroutine*, not a Future.
+               asyncio.gather() returns a _GatheringFuture — wrapping it in an
+               async def gives create_task a proper coroutine to schedule.
+            2. Each evaluator is isolated: one crashing does not lose the others.
+            """
+            async def _safe(coro, label: str) -> list:
+                try:
+                    return await coro
+                except Exception as exc:
+                    print(f"[Pipeline] {label} evaluation failed (non-fatal): {exc}")
+                    return []
+
+            async def _all_evals():
+                return await asyncio.gather(
+                    _safe(evaluate_functional(conversations, personas, config, llm_client, quality_criteria), "functional"),
+                    _safe(evaluate_security(conversations, personas, config, llm_client),                     "security"),
+                    _safe(evaluate_quality(conversations, personas, config, llm_client, quality_criteria),    "quality"),
+                )
+
+            eval_task = asyncio.create_task(_all_evals())
+            progress = 58
+            progress_labels = [
+                "Scoring functional conversations…",
+                "Running security checks…",
+                "Applying quality criteria…",
+                "Finalising evaluation scores…",
+            ]
+            label_idx = 0
+            while not eval_task.done():
+                await asyncio.sleep(10)
+                if not eval_task.done():
+                    progress = min(progress + 1, 67)
+                    label = progress_labels[min(label_idx, len(progress_labels) - 1)]
+                    label_idx += 1
+                    _update(job_store, run_id, progress, label, "evaluation")
+            return await eval_task
+
+        func_results, sec_results, qual_results = await _run_evals_with_progress()
+
+        # ── Stream 2: Ground truth direct evaluation (RAG mode only) ─────────
+        # Sends ground truth questions straight to the RAG endpoint with no persona
+        # state machine. Collected conversations are merged with Stream 1 conversations
+        # so evaluate_rag scores both together.
+        gt_conversations: List[Conversation] = []
+        if config.is_rag and config.ground_truth:
+            _update(job_store, run_id, 60, f"Running ground truth stream ({len(config.ground_truth)} Q&A pairs)…", "rag")
+            _log(job_store, run_id, "phase_start", {"phase": "rag", "label": "Ground Truth Stream"})
+            try:
+                gt_conversations = await run_ground_truth_conversations(
+                    config.ground_truth, config, project_id
+                )
+                _log(job_store, run_id, "gt_stream_complete", {
+                    "total_pairs": len(config.ground_truth),
+                    "completed": len(gt_conversations),
+                })
+            except Exception as gt_err:
+                print(f"[Pipeline] Ground truth stream failed: {gt_err}")
+
+        # RAG evaluation (only in RAG mode) — evaluates Stream 1 + Stream 2 conversations
         rag_results: List[MetricResult] = []
         if config.is_rag:
-            _update(job_store, run_id, 70, "Running RAG evaluation (faithfulness, recall, precision)…", "rag")
+            all_rag_conversations = conversations + gt_conversations
+            _update(job_store, run_id, 70, "Running RAG evaluation (faithfulness, recall, precision, answer correctness)…", "rag")
             _log(job_store, run_id, "phase_start", {"phase": "rag", "label": "RAG Evaluation"})
             try:
-                rag_results = await evaluate_rag(conversations, personas, config, llm_client)
+                async def _safe_rag():
+                    try:
+                        return await evaluate_rag(all_rag_conversations, personas, config, llm_client)
+                    except Exception as exc:
+                        print(f"[Pipeline] RAG evaluation failed (non-fatal): {exc}")
+                        return []
+
+                rag_task = asyncio.create_task(_safe_rag())
+                rag_progress = 70
+                rag_labels = [
+                    "Scoring answer relevancy…",
+                    "Checking answer correctness…",
+                    "Running hallucination checks…",
+                    "Finalising RAG metrics…",
+                ]
+                rag_label_idx = 0
+                while not rag_task.done():
+                    await asyncio.sleep(10)
+                    if not rag_task.done():
+                        rag_progress = min(rag_progress + 1, 71)
+                        label = rag_labels[min(rag_label_idx, len(rag_labels) - 1)]
+                        rag_label_idx += 1
+                        _update(job_store, run_id, rag_progress, label, "rag")
+                rag_results = await rag_task
             except Exception as rag_err:
-                print(f"[Pipeline] RAG evaluation failed: {rag_err}")
+                print(f"[Pipeline] RAG task setup failed: {rag_err}")
             _update(job_store, run_id, 71, f"RAG: {len(rag_results)} metrics evaluated", "rag",
                     {"count": len(rag_results), "passed": sum(1 for r in rag_results if r.passed)})
 
@@ -307,65 +424,79 @@ async def run_pipeline(
         _update(job_store, run_id, 90, "Aggregating results…", "aggregation")
         report = aggregate(
             metric_results=all_metric_results,
-            conversations=conversations,
+            conversations=conversations + gt_conversations,
             personas=personas,
             config=config,
             performance_metrics=perf_metrics,
             load_metrics=load_metrics,
             run_id=run_id,
             project_id=project_id,
+            # Fix 34: agent_name now lives on AggregatedReport (not added post-hoc)
+            agent_name=config.agent_name or (profile.domain.capitalize() + " Agent"),
         )
 
-        # ── Stage 6: Feedback Loop ─────────────────────────────────────────
-        if config.enable_feedback_loop:
-            _update(job_store, run_id, 90, "Running adaptive feedback loop…", "feedback")
-            _log(job_store, run_id, "phase_start", {"phase": "feedback", "label": "Adaptive Feedback Loop"})
-
-            async def _run_stages_on_new_slots(
-                new_slots: List[Dict], profile: AppProfile,
-                config: RunConfig, llm_client: LLMClient,
-            ) -> Tuple[List[MetricResult], List[Conversation], List[Persona]]:
-                new_personas = await build_all_personas(new_slots, profile, llm_client, project_id)
-                # Pass ground_truth so the feedback pass uses the same canonical
-                # question set as the first pass.  Without this, genuine personas
-                # created by the feedback loop fall through to LLM generation and
-                # produce off-topic prompts that dilute the ground-truth results.
-                new_func = await generate_all_functional(
-                    new_personas, profile, llm_client,
-                    rag_text=rag_text,
-                    ground_truth=config.ground_truth if config.is_rag else [],
-                )
-                new_sec  = await generate_all_security(new_personas, profile, llm_client,
-                                                       config.selected_attacks, config.attacks_per_category)
-                new_convs = await run_all_conversations(new_personas, new_func + new_sec, config, llm_client, project_id)
-                new_func_r = await evaluate_functional(new_convs, new_personas, config, llm_client, quality_criteria)
-                new_sec_r  = await evaluate_security(new_convs, new_personas, config, llm_client)
-                new_qual_r = await evaluate_quality(new_convs, new_personas, config, llm_client, quality_criteria)
-                return new_func_r + new_sec_r + new_qual_r, new_convs, new_personas
-
-            def fb_progress(pct: int, msg: str):
-                _update(job_store, run_id, pct, msg, "feedback")
-
-            original_persona_count = len(personas)
-            report, personas = await run_feedback_loop(
-                report=report,
-                profile=profile,
-                personas=personas,
+        # ── Stage 8: Root Cause Analysis ──────────────────────────────────
+        _update(job_store, run_id, 94, "Running root cause analysis…", "rca")
+        _log(job_store, run_id, "phase_start", {"phase": "rca", "label": "Root Cause Analysis"})
+        try:
+            rca_report = run_rca(
+                metric_results=all_metric_results,
+                conversations=conversations + gt_conversations,
                 config=config,
-                llm_client=llm_client,
-                run_stages_fn=_run_stages_on_new_slots,
-                progress_callback=fb_progress,
+                perf_metrics=perf_metrics,
+                load_metrics=load_metrics,
             )
-            new_personas_added = len(personas) - original_persona_count
-            effective = sum(1 for pb in report.persona_breakdown if hasattr(pb, "pass_rate") and pb.pass_rate < 50)
-            _log(job_store, run_id, "feedback_complete", {
-                "new_personas_count": new_personas_added,
-                "effective_personas": effective,
-                "new_persona_names": [p.name for p in personas[original_persona_count:]],
+            report.rca = rca_report
+            _log(job_store, run_id, "rca_complete", {
+                "total_failed":     rca_report.total_failed,
+                "relevant_points":  rca_report.relevant_points,
+                "filtered_points":  rca_report.filtered_points,
+                "top_cause":        rca_report.top_causes[0].label if rca_report.top_causes else "none",
+                "top_probability":  rca_report.top_causes[0].probability if rca_report.top_causes else 0.0,
             })
-            _update(job_store, run_id, 97, "Feedback loop complete", "feedback", {
-                "new_personas_count": new_personas_added,
-                "effective_personas": effective,
+            _update(job_store, run_id, 96, f"RCA: {len(rca_report.top_causes)} root causes identified", "rca",
+                    {"top_cause": rca_report.top_causes[0].label if rca_report.top_causes else "none"})
+        except Exception as rca_err:
+            import traceback as _tb
+            _rca_tb = _tb.format_exc()
+            print(f"[Pipeline] RCA failed (non-fatal):\n{_rca_tb}")
+            _log(job_store, run_id, "rca_warning", {
+                "message": f"Root cause analysis could not complete: {str(rca_err)[:200]}",
+                "detail": _rca_tb[-600:],
+            })
+
+        # ── Per-prompt failure classification ──────────────────────────────
+        _update(job_store, run_id, 96, "Classifying per-prompt failure reasons…", "rca")
+        try:
+            all_metric_results = await classify_prompt_failures(
+                all_metric_results, config, llm_client
+            )
+            # Re-sync individual phase lists (they share the same objects, but re-assign for safety)
+            func_results = [r for r in all_metric_results if r.superset == "functional"]
+            sec_results  = [r for r in all_metric_results if r.superset == "security"]
+            qual_results = [r for r in all_metric_results if r.superset == "quality"]
+            rag_results  = [r for r in all_metric_results if r.superset == "rag"]
+
+            # Patch failure_drill_down (built before classification) with taxonomy fields
+            _clf_index = {
+                (r.metric_name, r.persona_name, r.prompt[:80]): r
+                for r in all_metric_results
+                if r.failure_taxonomy_id
+            }
+            for entry in report.failure_drill_down:
+                key = (entry.get("metric_name",""), entry.get("persona_name",""), entry.get("prompt","")[:80])
+                matched = _clf_index.get(key)
+                if matched:
+                    entry["failure_taxonomy_id"]    = matched.failure_taxonomy_id
+                    entry["failure_taxonomy_label"] = matched.failure_taxonomy_label
+                    entry["failure_reason"]         = matched.failure_reason
+        except Exception as clf_err:
+            import traceback as _tb2
+            _clf_tb = _tb2.format_exc()
+            print(f"[Pipeline] Per-prompt classifier failed (non-fatal):\n{_clf_tb}")
+            _log(job_store, run_id, "classifier_warning", {
+                "message": f"Per-prompt failure classification could not complete: {str(clf_err)[:200]}",
+                "detail": _clf_tb[-600:],
             })
 
         # ── Stage 7: Report Generation ─────────────────────────────────────
@@ -387,7 +518,7 @@ async def run_pipeline(
 
         def _to_test_result(r: MetricResult) -> dict:
             return {
-                "test_id":    f"{r.metric_name}_{r.persona_id[:8]}_{r.conversation_id[:6]}",
+                "test_id":    f"{r.metric_name}_{r.persona_id[:8]}_{r.conversation_id}_{r.turn_number or 0}",
                 "test_name":  r.persona_name,
                 "category":   r.metric_name,   # full name — frontend maps to pretty label
                 "input_text": r.prompt,
@@ -396,6 +527,9 @@ async def run_pipeline(
                 "passed":     r.passed,
                 "reasoning":  r.reason,
                 "latency_ms": r.latency_ms or 0.0,
+                "failure_taxonomy_id":    r.failure_taxonomy_id,
+                "failure_taxonomy_label": r.failure_taxonomy_label,
+                "failure_reason":         r.failure_reason,
                 "details": {
                     "severity":            r.severity,
                     "owasp_category":      r.owasp_category,
@@ -408,7 +542,15 @@ async def run_pipeline(
 
         def _flat_phase(cls_key: str, results: list) -> dict:
             summary = tc.get(cls_key, {})
+            # Always emit every field the UI expects — when a class has zero
+            # results the summary dict is absent from tc, causing undefined/undefined.
+            non_skipped = [r for r in results if not r.skipped]
             return {
+                "total":    summary.get("total",    len(results)),
+                "passed":   summary.get("passed",   sum(1 for r in non_skipped if r.passed)),
+                "failed":   summary.get("failed",   sum(1 for r in non_skipped if not r.passed)),
+                "skipped":  summary.get("skipped",  len(results) - len(non_skipped)),
+                "avg_score": summary.get("avg_score", 0.0),
                 **summary,
                 "pass_rate": round(summary.get("pass_rate", 0) * 100, 1),
                 "results": [_to_test_result(r) for r in results],
@@ -462,8 +604,7 @@ async def run_pipeline(
             if isinstance(pb, dict) and "pass_rate" in pb:
                 pb["pass_rate"] = round(pb["pass_rate"] * 100, 1)
 
-        # Add agent_name
-        final_json["agent_name"] = config.agent_name or (profile.domain.capitalize() + " Agent")
+        # Fix 34: agent_name is already on the report model — no post-hoc addition needed
 
         # Add legacy fields for UI backward compatibility
         final_json["personas"] = [
@@ -478,10 +619,29 @@ async def run_pipeline(
         ]
         final_json["quality_criteria"] = quality_criteria
 
+        # Attach RCA to final JSON
+        if report.rca:
+            final_json["rca"] = report.rca.model_dump()
+
         job_store[run_id]["status"]   = "completed"
         job_store[run_id]["progress"] = 100
         job_store[run_id]["message"]  = f"Completed! Health score: {report.health_score:.0%}"
         job_store[run_id]["results"]  = final_json
+        _job_locks.pop(run_id, None)   # release lock for completed run
+
+        # Fix 28: persist completed run to SQLite for history / regression endpoints
+        try:
+            from core import db as _db
+            _db.save_run(
+                run_id=run_id,
+                project_id=project_id,
+                health_score=report.health_score,
+                domain=config.agent_domain,
+                application_type=config.application_type.value,
+                results=final_json,
+            )
+        except Exception as db_err:
+            print(f"[Pipeline] DB save failed (non-fatal): {db_err}")
 
     except Exception as e:
         import traceback
@@ -489,3 +649,4 @@ async def run_pipeline(
         job_store[run_id]["error"]  = str(e)
         job_store[run_id]["message"] = f"Pipeline failed: {str(e)[:200]}"
         print(f"[Pipeline ERROR] {run_id}: {traceback.format_exc()}")
+        _job_locks.pop(run_id, None)   # release lock on failure too

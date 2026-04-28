@@ -132,8 +132,9 @@ async def generate_quality_criteria(
         )
         if data and data.get("criteria"):
             return data
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[QualityCriteria] LLM criteria generation failed for domain '{profile.domain}' "
+              f"— falling back to domain preset or defaults. Error: {e}")
 
     # Final fallback: check domain fallback again, else default
     return DOMAIN_CRITERIA_FALLBACKS.get(domain, DEFAULT_CRITERIA)
@@ -147,3 +148,32 @@ def criteria_to_geval_string(criteria: dict) -> str:
         lines.append(f"{i}. {c['name']} ({weight_pct}%): {c['description']}")
     lines.append(f"\nPassing threshold: {criteria.get('passing_threshold', 0.65):.0%}")
     return "\n".join(lines)
+
+
+def filter_criteria_for_question(criteria: dict, question: str) -> dict:
+    """
+    Fix 2: Remove policy/procedure-type criteria from the set when the question
+    is a purely factual query. Prevents false 0.0 scores from criteria that
+    don't apply (e.g. 'policy_clarity' on 'what is the capital of France?').
+
+    Returns a new criteria dict with the filtered list; does not mutate in place.
+    The quality.py evaluator also performs this check inline, but providing it
+    here allows callers to pre-filter before generating criteria strings.
+    """
+    # Import the same detector used by quality.py (single source of truth)
+    try:
+        from stages.s4_evaluation.quality import _should_skip_criterion
+    except ImportError:
+        return criteria   # no-op if quality module not available at import time
+
+    filtered = [
+        c for c in criteria.get("criteria", [])
+        if not _should_skip_criterion(question, c.get("description", ""), c.get("name", ""))
+    ]
+    if not filtered:
+        return criteria   # if all would be filtered, return original (safety net)
+
+    return {
+        **criteria,
+        "criteria": filtered,
+    }

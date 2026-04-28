@@ -1,0 +1,189 @@
+================================================================================
+COMPLETE MASTER LIST OF FAILURE POINTS FOR AGENTS (RAG, AGENTIC RAG, CHATBOT)
+Deployed on Cloud (Server/Serverless) with Session DB
+================================================================================
+
+CATEGORY 1: AI / MODEL FAILURE POINTS
+--------------------------------------------------------------------------------
+HIGH-LEVEL (7):
+1. Hallucination & Unfaithful Generation
+2. Poor Tool/Action Selection
+3. Infinite Reasoning Loops
+4. Context Window Overflow
+5. Instruction Drift
+6. Model Deprecation / Version Change
+7. Zero-Shot Reasoning Failure
+
+DETAILED ROOT CAUSES (15):
+8. Model temperature too high (>0.7) → random tool selection
+9. Missing few‑shot examples in system prompt
+10. No explicit stop/termination token → infinite generation
+11. Instruction overload (>4k tokens) → lost in middle
+12. Underspecified tool descriptions → tool confusion
+13. No output schema validation → malformed JSON
+14. Context window fragmentation → oldest intent truncated
+15. Model fine‑tuning drift without notice
+16. Zero‑shot tool use → wrong parameter types
+17. No memory of previous tool outputs → repeated retrieval
+18. Asymmetric tokenization → tool names never match
+19. Hidden system prompt injection via RAG
+20. Model‑specific refusal patterns (Claude vs GPT)
+21. No confidence scoring → no fallback to user
+22. Beam search / sampling bugs → repetitive generation
+
+CATEGORY 2: RAG-SPECIFIC FAILURE POINTS
+--------------------------------------------------------------------------------
+HIGH-LEVEL (7):
+1. Retrieval Irrelevance
+2. Missing Chunks
+3. Index Drift
+4. Embedding Model Latency
+5. Reranker Failure
+6. Context Contamination
+7. Hybrid Search Misconfiguration
+
+(No separate detailed list was provided for RAG beyond these 7 in the Top‑15 RCAs, but the following were mentioned in the METRON document context):
+8. Chunk size too large → relevant sentence diluted
+9. No reranker → relevant chunk ranked below top_k
+10. Embedding model not fine‑tuned for domain
+11. Ground truth override misconfiguration
+
+CATEGORY 3: INTEGRATION & API FAILURE POINTS
+--------------------------------------------------------------------------------
+HIGH-LEVEL (7):
+1. API Gateway 429 (Rate Limit)
+2. API Gateway 401/403
+3. LLM Provider Timeout (504)
+4. Retry Storm (Thundering Herd)
+5. Tool API Schema Mismatch
+6. Message Queue Backpressure
+7. Circuit Breaker Trip
+
+DETAILED ROOT CAUSES (15):
+8. No per‑user token bucket → single tenant exhausts TPM
+9. Missing retry with jitter → thundering herd
+10. API Gateway timeout < model P99 latency → false 504
+11. Embedding model TPM not accounted → double consumption
+12. No circuit breaker for downstream tool
+13. LLM provider regional capacity exhaustion
+14. Hardcoded API keys → 401 after rotation
+15. Message queue max receives exceeded → poison DLQ missing
+16. Reranker API rate limit separate from LLM
+17. No fallback to cache on 429
+18. Webhook tool call synchronous → holds thread
+19. API version negotiation missing (v1 vs v2)
+20. Cross‑region latency > gateway timeout
+21. OAuth token refresh race → invalidation
+22. No 429 Retry‑After header parsing
+
+CATEGORY 4: SECURITY FAILURE POINTS
+--------------------------------------------------------------------------------
+HIGH-LEVEL (7):
+1. Prompt Injection (Direct)
+2. Indirect Prompt Injection (via retrieved documents)
+3. Data Exfiltration via Tool Calls
+4. Session Hijacking
+5. Tool Abuse / Quota Exhaustion
+6. Embedding Model Poisoning
+7. Secrets in Logs
+
+DETAILED ROOT CAUSES (15):
+8. RAG corpus not sanitised → indirect injection
+9. Agent tool permissions over‑broad (same IAM role for read and delete)
+10. No output sanitisation → leaks internal traces
+11. Session DB without encryption
+12. Missing cross‑session isolation
+13. Prompt injection via tool output
+14. No rate limiting on tool calls (email bomb)
+15. Vector DB without authentication → poisoning
+16. Agent logs stored in plaintext (CloudWatch)
+17. No input validation for tool arguments (path traversal)
+18. Agent can read system environment variables
+19. Session replay attack (predictable session ID)
+20. Missing audit trail for tool calls
+21. Model jailbreak via encoded prompts (base64, rot13)
+22. Embedding model inversion → privacy leak
+
+CATEGORY 5: LATENCY & PERFORMANCE FAILURE POINTS
+--------------------------------------------------------------------------------
+HIGH-LEVEL (7):
+1. Cold Start (Serverless)
+2. Sequential Tool Calls
+3. Token Generation Speed
+4. Vector DB Query Latency
+5. Session DB Read/Write
+6. Tool API Network Jitter
+7. Streaming Interruption
+
+DETAILED ROOT CAUSES (15):
+8. Serverless cold start for LLM container (5‑15s)
+9. Sequential tool calls without batching
+10. Large RAG chunk size (1024 tokens)
+11. Synchronous session DB write before every LLM call
+12. No streaming → user waits for full generation
+13. Vector DB index not in memory (SSD hit)
+14. Agent re‑embeds same query multiple times
+15. Full conversation history sent each turn
+16. No speculative execution (parallel tool DAG)
+17. Cross‑AZ network hop
+18. LLM provider global load balancer → distant region
+19. Heavy reranker (BERT‑large) on top‑20 chunks
+20. No response compression (large JSON tool outputs)
+21. Garbage collection in serverless runtime
+22. Synchronous logging to cloud storage (CloudWatch flush)
+
+CATEGORY 6: TPM / RATE LIMITING & 429 CHAIN REACTIONS
+--------------------------------------------------------------------------------
+HIGH-LEVEL (5):
+1. Burst Exhaustion
+2. No Per-User Quota
+3. Retry with Backoff Flood
+4. Embedding + LLM Combined TPM
+5. Fallback Model 429
+
+(These are already detailed; no separate Top‑15 was given beyond these 5)
+
+CATEGORY 7: DATABASE & SESSION MANAGEMENT FAILURE POINTS
+--------------------------------------------------------------------------------
+HIGH-LEVEL (6):
+1. Session State Corruption
+2. Connection Pool Exhaustion
+3. Row Lock Contention
+4. TTL Expiration Mid-Conversation
+5. Serialization Bloat
+6. Read-After-Write Inconsistency
+
+DETAILED ROOT CAUSES (9 from Top‑15 list):
+7. Session DB connection pool overflow
+8. No row‑level locking → lost update
+9. TTL too short (user thinking 2 min → session deleted)
+10. Read replica lag → inconsistent memory
+11. No cost budget per session → $50 loop
+12. Missing trace IDs → cannot correlate API → agent step → DB
+13. Agent checkpoint not stored → timeout loses progress
+14. Version skew between agent code and stored session schema
+15. No dead‑letter queue for failed agent steps
+
+CATEGORY 8: OPERATIONAL & OTHER FAILURE POINTS
+--------------------------------------------------------------------------------
+HIGH-LEVEL (7):
+1. Observability Gap
+2. Cost Explosion
+3. Version Mismatch
+4. No Graceful Degradation
+5. Checkpointing Failure
+6. Multi-Region Drift
+7. Testing Blindness
+
+DETAILED ROOT CAUSES (additional from Top‑15 "Other" list):
+8. No dead‑letter queue for failed agent steps (also in DB)
+9. Observability sampling rate 0.1% → misses 99.9% of 429 errors
+10. Single‑region deployment → region outage kills all agents
+11. No circuit breaker for session DB → timeout cascade
+12. Logging PII → compliance violation
+13. No max tool call depth → infinite loop
+14. Missing alert on cost anomaly
+
+================================================================================
+TOTAL UNIQUE FAILURE POINTS: 22 (AI) + 11 (RAG) + 22 (Integration) + 22 (Security) + 22 (Latency) + 5 (TPM) + 15 (DB) + 14 (Operational) = 133
+================================================================================

@@ -60,6 +60,14 @@ def make_deepeval_azure_model():
 
     endpoint   = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
     api_key    = os.environ.get("AZURE_OPENAI_API_KEY", "")
+
+    # Return None when Azure credentials are not configured — callers check
+    # `if deval_model is None:` to skip DeepEval metrics and show a warning.
+    # Without this guard, the model is created with empty credentials, the
+    # warning never fires, and every metric call fails with an auth error.
+    if not endpoint or not api_key:
+        return None
+
     api_version= os.environ.get("AZURE_API_VERSION", "2025-01-01-preview")
     deployment = _parse_deployment(endpoint)
     base_url   = _parse_base_url(endpoint)
@@ -83,17 +91,31 @@ def make_deepeval_azure_model():
             )
 
         def generate(self, prompt: str) -> str:
-            response = self.model.chat.completions.create(
-                model=self._deployment,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=2048,
-            )
-            return response.choices[0].message.content
+            import time
+            last_exc = None
+            for attempt in range(3):
+                try:
+                    response = self.model.chat.completions.create(
+                        model=self._deployment,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0,
+                        max_tokens=2048,
+                    )
+                    return response.choices[0].message.content
+                except Exception as e:
+                    last_exc = e
+                    msg = str(e)
+                    if "429" in msg or "rate_limit" in msg.lower() or "rate limit" in msg.lower():
+                        wait = 10 * (attempt + 1)
+                        print(f"[DeepEval/Azure] Rate limited — waiting {wait}s (attempt {attempt+1}/3)")
+                        time.sleep(wait)
+                    else:
+                        raise
+            raise RuntimeError(f"DeepEval Azure: max retries exceeded — {last_exc}")
 
         async def a_generate(self, prompt: str) -> str:
             import asyncio
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, self.generate, prompt)
 
         def get_model_name(self) -> str:

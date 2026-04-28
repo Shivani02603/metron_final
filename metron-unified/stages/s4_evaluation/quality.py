@@ -4,41 +4,156 @@ Strict tool-only — no LLM fallback scores.
 
 Metrics:
   - GEval (domain-specific criteria) → DeepEval GEval (Azure OpenAI)
-                                        Skipped per-conversation if DeepEval throws.
-  - RAGAS Faithfulness               → RAGAS (RAG mode only)
-  - RAGAS Answer Relevancy           → RAGAS (RAG mode only)
-  - RAGAS Context Recall             → RAGAS (RAG mode + ground truth required)
-  - RAGAS Context Precision          → RAGAS (RAG mode + ground truth required)
+    Skipped per-conversation when:
+      * DeepEval throws (rate limit, timeout) — recorded as skipped MetricResult
+      * The question is purely factual AND the criterion is policy/procedure-type
+        (Fix 2: scope filter prevents false 0.0 scores on factual questions)
+
+RAGAS metrics live exclusively in rag.py (Fix 5: removed from here to prevent
+duplicate evaluation with different chunk limits).
 
 Error responses (is_error_response=True) are skipped.
+Security conversations (test_class=SECURITY) are skipped — attack prompts trigger
+Azure content filter, and domain-quality metrics are not meaningful for adversarial inputs.
 """
 
 from __future__ import annotations
 import asyncio
+import re
 from typing import List, Optional
 
 from core.llm_client import LLMClient
 from core.models import (
-    ApplicationType, Conversation, MetricResult, Persona, RunConfig, TestClass,
+    Conversation, MetricResult, Persona, RunConfig, TestClass,
 )
 from core.config import THRESHOLDS
 from core.deepeval_azure import make_deepeval_azure_model
 
 
+# ── Escalation criterion filter ───────────────────────────────────────────────
+
+_ESCALATION_KEYWORDS = frozenset({
+    "escalat", "hand off", "handoff", "transfer to human", "human agent",
+    "live agent", "escalation appropriateness",
+})
+_SUPPORT_DOMAINS = frozenset({
+    "support", "customer_support", "helpdesk", "help_desk", "triage",
+    "service_desk", "contact_center",
+})
+
+
+def _is_escalation_criterion(name: str, description: str) -> bool:
+    text = (name + " " + description).lower()
+    return any(kw in text for kw in _ESCALATION_KEYWORDS)
+
+
+def _is_support_agent(config) -> bool:
+    domain   = (getattr(config, "agent_domain",      "") or "").lower()
+    app_type = (getattr(config, "application_type",  "") or "").lower()
+    return any(kw in domain or kw in app_type for kw in _SUPPORT_DOMAINS)
+
+
+# ── Factual question detector (Fix 2) ────────────────────────────────────────
+
+# Policy/procedure criterion keywords — criteria whose descriptions contain these
+# words are not meaningful on purely factual questions.
+_POLICY_KEYWORDS = frozenset({
+    "policy", "policies", "procedure", "procedures", "compliance", "guideline",
+    "guidelines", "regulation", "regulations", "rule", "rules", "protocol",
+    "protocols", "standard", "standards", "requirement", "requirements",
+})
+
+# Pattern that identifies factual/identity questions (who/what/where/when/how many)
+_FACTUAL_PATTERN = re.compile(
+    r"^\s*(what|where|who|when|how many|how much|which|is|are|was|were)\b.{0,80}\??\s*$",
+    re.IGNORECASE,
+)
+
+# Pattern that identifies genuine support/complaint requests where escalation
+# criteria are meaningful (issues, errors, complaints, explicit escalation requests).
+_SUPPORT_REQUEST_PATTERN = re.compile(
+    r"\b(issue|problem|error|broken|not working|crash(?:ing)?|fail(?:ing|ed)?|"
+    r"complaint|escalate|escalation|transfer|speak to|talk to|human agent|"
+    r"live agent|manager|supervisor|refund|cancel(?:lation)?|support ticket|"
+    r"case number|unresolved|ticket|incident)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_factual_question(text: str) -> bool:
+    """Return True when the query looks like a short factual/identity question."""
+    return bool(_FACTUAL_PATTERN.match(text.strip()))
+
+
+def _is_support_request_query(text: str) -> bool:
+    """
+    Return True when the query contains language typical of a genuine support or
+    complaint scenario (errors, issues, escalation requests, cancellations, etc.).
+    Used to gate escalation-appropriateness criteria: those criteria only make
+    sense when the user is actually experiencing a problem, not when they are
+    asking for drafting help or other non-support tasks.
+    """
+    return bool(_SUPPORT_REQUEST_PATTERN.search(text.strip()))
+
+
+def _criterion_is_policy_type(description: str) -> bool:
+    """Return True when the criterion description is policy/procedure-oriented."""
+    desc_lower = description.lower()
+    return any(kw in desc_lower for kw in _POLICY_KEYWORDS)
+
+
+def _should_skip_criterion(query: str, criterion_description: str, criterion_name: str = "") -> bool:
+    """
+    Fix 2: Skip a domain criterion for this conversation if the question is
+    purely factual AND the criterion is policy/procedure-oriented.
+    These combinations reliably produce false 0.0 scores.
+
+    Also skips escalation-appropriateness criteria when the query does not
+    contain language indicative of a support or complaint scenario.  Escalation
+    criteria are only meaningful when a user is reporting an issue or requesting
+    human intervention; applying them to e.g. email-drafting or FAQ queries
+    produces consistently low scores that do not reflect a real deficiency.
+    """
+    # Policy-type criterion on a pure factual question
+    if _is_factual_question(query) and _criterion_is_policy_type(criterion_description):
+        return True
+    # Escalation criterion on a non-support query
+    if (
+        _is_escalation_criterion(criterion_name, criterion_description)
+        and not _is_support_request_query(query)
+    ):
+        return True
+    return False
+
+
 # ── DeepEval GEval ────────────────────────────────────────────────────────────
 
-def _run_deepeval_geval(question: str, response: str, criteria: list, model) -> dict:
+def _run_deepeval_geval(
+    question: str,
+    response: str,
+    criteria: list,
+    criteria_weights: dict,
+    model,
+) -> dict:
     """
-    DeepEval GEval with domain-specific criteria.
-    Raises on failure — caller skips metric for this conversation.
+    DeepEval GEval with domain-specific criteria and weighted overall score.
+
+    Fix 4: overall = weighted mean using criterion weights instead of simple average.
+    Raises on failure — caller records a skipped MetricResult.
     """
     from deepeval.metrics import GEval
     from deepeval.test_case import LLMTestCase, LLMTestCaseParams
 
-    scores = {}
-    for criterion in criteria[:6]:
+    scores: dict[str, float] = {}
+    for criterion in criteria:   # evaluate all configured criteria, not just the first 6
         name        = criterion.get("name", "quality")
         description = criterion.get("description", name)
+
+        # Fix 2: skip policy-type criteria for factual questions,
+        # and skip escalation criteria for non-support queries.
+        if _should_skip_criterion(question, description, name):
+            continue
+
         metric = GEval(
             name=name,
             criteria=description,
@@ -51,127 +166,20 @@ def _run_deepeval_geval(question: str, response: str, criteria: list, model) -> 
         scores[name] = round(float(metric.score), 4)
 
     if not scores:
-        raise RuntimeError("GEval returned no scores")
+        raise RuntimeError("GEval returned no scores (all criteria skipped or failed)")
 
-    overall = round(sum(scores.values()) / len(scores), 4)
-    return {"scores": scores, "overall": overall, "method": "deepeval_geval"}
-
-
-# ── RAGAS ─────────────────────────────────────────────────────────────────────
-
-async def _ragas_full(
-    query: str,
-    response: str,
-    context: list,
-    ground_truth: str,
-) -> dict[str, tuple[float, str]]:
-    """
-    Run RAGAS metrics for one conversation.
-
-    Metric priority (mirrors rag.py strategy):
-      1. Non-LLM metrics first (no Azure required):
-           NonLLMContextPrecisionWithReference  — needs ground_truth
-           NonLLMContextRecall                  — needs ground_truth
-      2. LLM metric (Azure required, added when env vars are present):
-           Faithfulness
-    Returns dict of metric_name → (score, method).
-    Raises on complete failure — caller handles.
-    """
-    import os, math
-    from ragas import evaluate as ragas_evaluate  # type: ignore
-
-    ctx    = context[:3] or [""]
-    has_gt = bool(ground_truth and ground_truth.strip())
-    metrics_to_run: list = []
-
-    # ── 1. Non-LLM metrics (always attempted when ground truth is available) ──
-    if has_gt:
-        try:
-            from ragas.metrics import NonLLMContextPrecisionWithReference  # type: ignore
-            metrics_to_run.append(NonLLMContextPrecisionWithReference())
-        except (ImportError, Exception):
-            pass
-
-        try:
-            from ragas.metrics import NonLLMContextRecall  # type: ignore
-            metrics_to_run.append(NonLLMContextRecall())
-        except (ImportError, Exception):
-            pass
-
-    # ── 2. LLM metric: faithfulness (only when Azure is configured) ───────────
-    azure_ready = bool(
-        os.environ.get("AZURE_OPENAI_ENDPOINT") and
-        os.environ.get("AZURE_OPENAI_API_KEY")
+    # Fix 4: weighted overall score
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for name, score in scores.items():
+        w = criteria_weights.get(name, 1.0)
+        weighted_sum += score * w
+        total_weight  += w
+    overall = round(weighted_sum / total_weight, 4) if total_weight > 0 else round(
+        sum(scores.values()) / len(scores), 4
     )
-    if azure_ready:
-        try:
-            from ragas.llms import LangchainLLMWrapper  # type: ignore
-            from stages.s4_evaluation.functional import _build_azure_langchain_llm
-            ragas_llm = LangchainLLMWrapper(_build_azure_langchain_llm())
-            try:
-                from ragas.metrics import faithfulness as r_faith  # type: ignore
-                r_faith.llm = ragas_llm
-                metrics_to_run.append(r_faith)
-            except AttributeError:
-                from ragas.metrics import Faithfulness  # type: ignore
-                metrics_to_run.append(Faithfulness(llm=ragas_llm))
-        except Exception as e:
-            print(f"[RAGAS/quality] Faithfulness setup failed: {e}")
 
-    if not metrics_to_run:
-        raise RuntimeError("No RAGAS metrics available (ground_truth required for non-LLM metrics)")
-
-    # Build dataset
-    try:
-        from ragas import EvaluationDataset, SingleTurnSample  # type: ignore
-        sample = SingleTurnSample(
-            user_input=query,
-            response=response,
-            retrieved_contexts=ctx,
-            reference=ground_truth if has_gt else None,
-        )
-        ds = EvaluationDataset(samples=[sample])
-    except (ImportError, AttributeError):
-        from datasets import Dataset  # type: ignore
-        data: dict = {"question": [query], "answer": [response], "contexts": [ctx]}
-        if has_gt:
-            data["ground_truth"] = [ground_truth]
-        ds = Dataset.from_dict(data)
-
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, lambda: ragas_evaluate(ds, metrics=metrics_to_run))
-
-    # Column map covers both LLM-based and non-LLM column names
-    col_map = {
-        "faithfulness":                             "ragas_faithfulness",
-        "context_recall":                           "ragas_context_recall",
-        "context_precision":                        "ragas_context_precision",
-        "non_llm_context_precision_with_reference": "ragas_context_precision",
-        "non_llm_context_recall":                   "ragas_context_recall",
-    }
-    out: dict[str, tuple[float, str]] = {}
-
-    try:
-        df  = result.to_pandas()
-        row = df.iloc[0]
-        for col, metric_name in col_map.items():
-            if col in df.columns and metric_name not in out:
-                raw   = row[col]
-                score = float(raw) if (raw == raw and not (isinstance(raw, float) and math.isnan(raw))) else 0.0
-                out[metric_name] = (round(score, 4), "ragas")
-    except Exception:
-        # Fallback: dict-style access (ragas 0.1.x)
-        for col, metric_name in col_map.items():
-            if metric_name in out:
-                continue
-            try:
-                val = result[col]
-                if val is not None and not (isinstance(val, float) and math.isnan(val)):
-                    out[metric_name] = (round(float(val), 4), "ragas")
-            except (KeyError, TypeError):
-                pass
-
-    return out
+    return {"scores": scores, "overall": overall, "method": "deepeval_geval"}
 
 
 # ── Main evaluator ────────────────────────────────────────────────────────────
@@ -183,26 +191,43 @@ async def evaluate_quality(
     llm_client: LLMClient,
     quality_criteria: Optional[dict] = None,
 ) -> List[MetricResult]:
-    """Evaluate quality using DeepEval GEval + RAGAS (tool-only, no LLM fallback)."""
+    """
+    Evaluate quality using DeepEval GEval (domain-specific criteria only).
+
+    Fix 5: RAGAS is NOT run here — it runs exclusively in rag.py.
+    Fix 2: Factual questions skip policy-type criteria.
+    Fix 4: Criterion weights used in overall score.
+    Fix 36: Exceptions produce skipped MetricResult instead of silently dropping.
+    """
     from stages.s4_evaluation.functional import _set_azure_env
     _set_azure_env(config)
 
     deval_model = make_deepeval_azure_model()
+    if deval_model is None:
+        print("[QualityEval] WARNING: Azure OpenAI not configured — GEval quality criteria "
+              "will be skipped. Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY to enable.")
 
     persona_map  = {p.persona_id: p for p in personas}
     results: List[MetricResult] = []
 
     criteria_list: list = []
+    criteria_weights: dict = {}
     if quality_criteria:
-        criteria_list = quality_criteria.get("criteria", [])
+        criteria_list    = quality_criteria.get("criteria", [])
+        # Build weight map from criteria definitions (default 1.0 if absent)
+        criteria_weights = {
+            c.get("name", "quality"): float(c.get("weight", 1.0))
+            for c in criteria_list
+        }
 
     threshold = (
         quality_criteria.get("passing_threshold", THRESHOLDS["quality_pass"])
         if quality_criteria else THRESHOLDS["quality_pass"]
     )
 
-    sem  = asyncio.Semaphore(5)
-    loop = asyncio.get_event_loop()
+    sem  = asyncio.Semaphore(3)
+    loop = asyncio.get_running_loop()   # Fix 20: was get_event_loop()
+    _DEVAL_TIMEOUT = 120  # hard ceiling per GEval call — prevents Azure hang freezing the pipeline
 
     async def _eval_one(conv: Conversation) -> List[MetricResult]:
         if not conv.turns:
@@ -212,17 +237,13 @@ async def evaluate_quality(
         if last_turn.is_error_response:
             return []
 
-        # Skip quality GEval for security conversations — attack prompts (jailbreak /
-        # harmful content from AdvBench/HarmBench) trigger Azure content filter when
-        # passed as GEval input. Quality metrics (coherence, tone, etc.) are also not
-        # meaningful for adversarial test conversations.
+        # Skip quality GEval for security conversations
         if conv.test_class == TestClass.SECURITY:
             return []
 
         persona  = persona_map.get(conv.persona_id)
         fishbone = persona.fishbone_dimensions if persona else {}
         intent   = persona.intent.value if persona else "genuine"
-        expected = last_turn.expected_behavior or ""
 
         base_meta = dict(
             conversation_id=conv.conversation_id,
@@ -236,53 +257,51 @@ async def evaluate_quality(
         )
         local: List[MetricResult] = []
 
-        # ── GEval (domain-specific criteria) ─────────────────────────────────
+        # ── GEval (domain-specific criteria, Fix 2+4+36) ─────────────────────
         # Respect config.use_geval — the UI toggle that disables GEval entirely.
-        if criteria_list and getattr(config, "use_geval", True):
-            try:
-                geval_result = await loop.run_in_executor(
-                    None, _run_deepeval_geval,
-                    last_turn.query, last_turn.response, criteria_list, deval_model
-                )
-                method    = geval_result.get("method", "deepeval_geval")
-                for criterion_name, score in geval_result["scores"].items():
-                    local.append(MetricResult(
-                        **base_meta,
-                        metric_name=f"geval_{criterion_name.lower().replace(' ', '_')}",
-                        score=float(score),
-                        passed=float(score) >= threshold,
-                        reason=f"DeepEval GEval {criterion_name} (method: {method})",
-                    ))
-                local.append(MetricResult(
-                    **base_meta,
-                    metric_name="geval_overall",
-                    score=geval_result["overall"],
-                    passed=geval_result["overall"] >= threshold,
-                    reason=f"GEval overall (method: {method})",
-                ))
-            except Exception as e:
-                print(f"[GEval] DeepEval error (conv {conv.conversation_id[:8]}): {e}")
-
-        # ── RAGAS (RAG mode only) ─────────────────────────────────────────────
-        if config.application_type == ApplicationType.RAG and last_turn.retrieved_context:
+        # Filter out escalation criteria for non-support agents.
+        effective_criteria = [
+            c for c in criteria_list
+            if _is_support_agent(config) or not _is_escalation_criterion(
+                c.get("name", ""), c.get("description", "")
+            )
+        ]
+        if effective_criteria and getattr(config, "use_geval", True):
             async with sem:
                 try:
-                    rag_metrics = await _ragas_full(
-                        last_turn.query,
-                        last_turn.response,
-                        last_turn.retrieved_context,
-                        expected,
+                    geval_result = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None, _run_deepeval_geval,
+                            last_turn.query, last_turn.response,
+                            effective_criteria, criteria_weights, deval_model
+                        ),
+                        timeout=_DEVAL_TIMEOUT,
                     )
-                    for metric_name, (score, method) in rag_metrics.items():
+                    method = geval_result.get("method", "deepeval_geval")
+                    for criterion_name, score in geval_result["scores"].items():
                         local.append(MetricResult(
                             **base_meta,
-                            metric_name=metric_name,
-                            score=score,
-                            passed=score >= THRESHOLDS["quality_pass"],
-                            reason=f"{metric_name.replace('_', ' ').title()}: {score:.3f} (method: {method})",
+                            metric_name=f"geval_{criterion_name.lower().replace(' ', '_')}",
+                            score=float(score),
+                            passed=float(score) >= threshold,
+                            reason=f"DeepEval GEval {criterion_name} (method: {method})",
                         ))
+                    local.append(MetricResult(
+                        **base_meta,
+                        metric_name="geval_overall",
+                        score=geval_result["overall"],
+                        passed=geval_result["overall"] >= threshold,
+                        reason=f"GEval weighted overall (method: {method})",
+                    ))
                 except Exception as e:
-                    print(f"[RAGAS] Error (conv {conv.conversation_id[:8]}): {e}")
+                    # Fix 36: record skipped result instead of silently dropping
+                    local.append(MetricResult(
+                        **base_meta,
+                        metric_name="geval_overall",
+                        score=0.0, passed=False, reason="",
+                        skipped=True,
+                        skip_reason=f"DeepEval GEval error: {str(e)[:120]}",
+                    ))
 
         return local
 

@@ -103,7 +103,9 @@ async def generate_functional_prompts(
     rag_section = ""
     rag_rules = ""
     if rag_text and rag_text.strip():
-        snippet = rag_text.strip()[:800]
+        # Increased from 800 to 3000 chars so test cases are grounded in a
+        # representative portion of the knowledge base, not just the opening lines.
+        snippet = rag_text.strip()[:3000]
         rag_section = f"- Knowledge Base (excerpt):\n{snippet}\n"
         rag_rules = "- The expected_behavior MUST be based on the actual content in the knowledge base above\n- Do NOT hallucinate facts — only reference what is in the knowledge base\n"
 
@@ -125,6 +127,35 @@ async def generate_functional_prompts(
     )
 
     generated: List[GeneratedPrompt] = []
+
+    # ── Priority 1: use multi_turn_scenario from rich persona generation ──
+    # These are pre-crafted literal prompts with real artifacts (typos, paste
+    # fragments, mixed languages) — far more diverse than LLM-generated generics.
+    if persona.multi_turn_scenario:
+        for turn in persona.multi_turn_scenario[:3]:
+            text = turn.get("prompt", "").strip()
+            if text:
+                generated.append(GeneratedPrompt(
+                    persona_id=persona.persona_id,
+                    test_class=TestClass.FUNCTIONAL,
+                    text=text,
+                    expected_behavior="",
+                    turn_number=turn.get("turn", 1),
+                ))
+        # If scenario gave us prompts, also add example_prompts as additional tests
+        for ep in persona.entry_points[:2]:
+            if ep and ep not in {g.text for g in generated}:
+                generated.append(GeneratedPrompt(
+                    persona_id=persona.persona_id,
+                    test_class=TestClass.FUNCTIONAL,
+                    text=ep,
+                    expected_behavior="",
+                    turn_number=1,
+                ))
+        if generated:
+            return generated
+
+    # ── Priority 2: LLM-generated prompts (grounded in app profile / RAG KB) ──
     try:
         data = await llm_client.complete_json(
             prompt, temperature=0.8, max_tokens=1200, task="fast", retries=2,
@@ -139,10 +170,11 @@ async def generate_functional_prompts(
                 expected_behavior=p.get("expected_behavior", ""),
                 turn_number=p.get("turn", 1),
             ))
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[FunctionalGen] LLM prompt generation failed for persona '{persona.name}' "
+              f"(domain: {profile.domain}) — falling back to entry_points. Error: {e}")
 
-    # Fallback: use persona's entry_points
+    # ── Priority 3: entry_points from persona ─────────────────────────────
     if not generated:
         for i, ep in enumerate(persona.entry_points[:3]):
             generated.append(GeneratedPrompt(
@@ -181,7 +213,8 @@ async def generate_performance_prompts(
                 text=p["text"],
                 expected_behavior=p.get("expected_behavior", ""),
             ))
-    except Exception:
+    except Exception as e:
+        print(f"[FunctionalGen] Performance prompt generation failed for persona '{persona.name}' — using entry_point. Error: {e}")
         if persona.entry_points:
             generated.append(GeneratedPrompt(
                 persona_id=persona.persona_id,
@@ -192,64 +225,20 @@ async def generate_performance_prompts(
     return generated
 
 
-def _ground_truth_to_prompts(
-    ground_truth: list,
-    personas: List[Persona],
-) -> List[GeneratedPrompt]:
-    """
-    Convert ground truth Q&A pairs directly into GeneratedPrompts.
-    Distributes pairs across genuine personas (round-robin).
-    Used in RAG mode when the user provides a ground truth file.
-    """
-    genuine = [p for p in personas if p.intent.value == "genuine"] or personas
-    prompts = []
-    for i, pair in enumerate(ground_truth):
-        question = pair.get("question", "").strip()
-        expected = pair.get("expected_answer", "").strip()
-        if not question:
-            continue
-        persona = genuine[i % len(genuine)]
-        # Parse context — may be a string (single chunk) or list
-        raw_ctx = pair.get("context", "")
-        if isinstance(raw_ctx, list):
-            ctx_chunks = [str(c) for c in raw_ctx if c]
-        elif raw_ctx:
-            ctx_chunks = [raw_ctx]
-        else:
-            ctx_chunks = None
-
-        prompts.append(GeneratedPrompt(
-            persona_id=persona.persona_id,
-            test_class=TestClass.FUNCTIONAL,
-            text=question,
-            expected_behavior=expected,        # used by functional evaluator
-            expected_answer=expected,          # used by RAG evaluator
-            ground_truth_context=ctx_chunks,   # used by RAGAS — provided by user
-            turn_number=1,
-        ))
-    return prompts
-
-
 async def generate_all_functional(
     personas: List[Persona],
     profile: AppProfile,
     llm_client: LLMClient,
     rag_text: str = "",
-    ground_truth: list = [],
+    max_prompts: int = 0,   # Fix 35: 0 = no cap; >0 = cap total prompts to this value
 ) -> List[GeneratedPrompt]:
-    """Generate functional prompts for all personas in parallel.
-    In RAG mode with ground truth: uses Q&A pairs directly (no LLM generation).
-    In RAG mode without ground truth: generates via LLM grounded in knowledge base.
     """
-    from core.models import ApplicationType
-    # Use ground truth Q&A pairs directly whenever they are provided — do not
-    # re-check profile.application_type here because the profile may still carry
-    # ApplicationType.CHATBOT if the user toggled is_rag without updating the
-    # application_type dropdown.  ground_truth is only populated in pipeline.py
-    # when config.is_rag is True, so this check is sufficient.
-    if ground_truth:
-        return _ground_truth_to_prompts(ground_truth, personas)
+    Generate functional prompts for all personas in parallel via LLM.
+    In RAG mode: rag_text grounds the generated questions in the knowledge base.
+    Ground truth Q&A pairs are handled separately in Stream 2 (pipeline.py).
 
+    Fix 35: max_prompts caps the total output when config.num_scenarios is set.
+    """
     sem = asyncio.Semaphore(5)
 
     async def _bounded(persona):
@@ -257,4 +246,8 @@ async def generate_all_functional(
             return await generate_functional_prompts(persona, profile, llm_client, rag_text=rag_text)
 
     batches = await asyncio.gather(*[_bounded(p) for p in personas])
-    return [prompt for batch in batches for prompt in batch]
+    result = [prompt for batch in batches for prompt in batch]
+
+    if max_prompts > 0:
+        result = result[:max_prompts]
+    return result

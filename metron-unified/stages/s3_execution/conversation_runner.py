@@ -9,6 +9,7 @@ Sourced from new metron-backend/app/stage4_execution/conversation_runner.py.
 
 from __future__ import annotations
 import asyncio
+import json as _json_mod
 from datetime import datetime
 from typing import List, Optional
 
@@ -24,7 +25,24 @@ from core.models import (
 )
 
 
-MAX_TURNS = 3   # Turn 1 free (entry_point), Turns 2-3 via combined eval+generate
+_DEFAULT_MAX_TURNS = 3   # fallback when config.conversation_turns is absent
+
+
+def _format_for_eval(text: str) -> str:
+    """
+    Format an AI response for persona evaluation.
+    If the response is valid JSON, pretty-prints it so the evaluator LLM
+    understands it is structured output (e.g. an email object) rather than
+    treating raw compact JSON as a confusing or unhelpful reply.
+    """
+    stripped = text.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            parsed = _json_mod.loads(stripped)
+            return _json_mod.dumps(parsed, indent=2)
+        except (_json_mod.JSONDecodeError, ValueError):
+            pass
+    return text
 
 COMBINED_TURN_PROMPT = """
 Do two things at once:
@@ -73,6 +91,9 @@ def _get_adapter(config: RunConfig) -> object:
         response_field=config.response_field,
         auth_type=config.auth_type,
         auth_token=config.auth_token,
+        timeout=getattr(config, "adapter_timeout", 60),
+        request_template=getattr(config, "request_template", None),
+        response_trim_marker=getattr(config, "response_trim_marker", None),
     )
     if config.application_type == ApplicationType.RAG:
         return RAGAdapter(**kwargs)
@@ -105,26 +126,38 @@ async def run_conversation(
         started_at=datetime.utcnow(),
     )
 
+    # Cap at 15 turns maximum to prevent runaway cost while still respecting
+    # user-configured values up to 15. Warn when config is overridden.
+    _MAX_TURNS_HARD_CAP = 15
+    configured_turns = getattr(config, "conversation_turns", _DEFAULT_MAX_TURNS) or _DEFAULT_MAX_TURNS
+    max_turns = min(configured_turns, _MAX_TURNS_HARD_CAP)
+    if configured_turns > _MAX_TURNS_HARD_CAP:
+        print(f"[ConversationRunner] conversation_turns={configured_turns} exceeds cap of {_MAX_TURNS_HARD_CAP}, using {_MAX_TURNS_HARD_CAP}")
+
     current_state = ConversationState.SEEKING
     current_message = prompt.text   # Start with the generated prompt
     history_lines: List[str] = []
 
-    for turn_num in range(1, MAX_TURNS + 1):
-        # Send to adapter — retry once on 429 (target endpoint rate limit)
-        resp: AdapterResponse = await adapter.send(current_message)
+    conv_id = conversation.conversation_id
+
+    for turn_num in range(1, max_turns + 1):
+        # Send to adapter — retry with exponential backoff on 429 (endpoint rate limit)
+        resp: AdapterResponse = await adapter.send(current_message, conversation_id=conv_id)
         if resp.error and "429" in str(resp.error):
-            await asyncio.sleep(2)
-            resp = await adapter.send(current_message)
+            for _retry_attempt in range(3):
+                _wait = 2 ** (_retry_attempt + 1)   # 2s, 4s, 8s
+                await asyncio.sleep(_wait)
+                resp = await adapter.send(current_message, conversation_id=conv_id)
+                if not (resp.error and "429" in str(resp.error)):
+                    break
         latency_ms = resp.latency_ms
 
-        # Detect error response — includes field-not-found and HTTP errors
+        # Detect error response — adapters route extraction/HTTP errors to resp.error,
+        # so not resp.ok and not resp.text cover all failure cases.
         is_error = (
             not resp.ok
             or not resp.text
             or resp.text.startswith("[Error")
-            or resp.text.startswith("[Field")
-            or resp.text.startswith("[Index")
-            or resp.text.startswith("[Empty")
         )
 
         # For SECURITY conversations, HTTP errors are meaningful results:
@@ -166,10 +199,15 @@ async def run_conversation(
             conversation.goal_achieved = not is_error
             break
 
+        # Security conversations are always single-turn — one probe, one response.
+        # Multi-turn generation for adversarial probes makes expensive LLM calls and
+        # is unnecessary since all attack variants are pre-generated in Stage 2.
+        if is_security:
+            break
+
         # Stop early: last turn reached, or chatbot returned an error/bad field.
-        # Security convs also stop on error (1 turn is enough) but don't mark goal_achieved=False.
-        if turn_num >= MAX_TURNS or is_error:
-            if is_error and not is_security:
+        if turn_num >= max_turns or is_error:
+            if is_error:
                 conversation.goal_achieved = False
             break
 
@@ -224,13 +262,14 @@ async def _combined_eval_generate(
         abandon_trigger=persona.behavioral_params.abandon_trigger,
         base_style=persona.language_model.base_style or "conversational",
         frustrated_style=persona.language_model.frustrated_style or "more direct",
-        response=ai_response[:1200],
+        response=_format_for_eval(ai_response)[:3000],
         history=history,
     )
 
     try:
+        # Fix 24: use judge-tier model (70B / GPT-4o) — 8B (fast) makes poor persona decisions
         data = await llm_client.complete_json(
-            prompt, temperature=0.3, max_tokens=600, task="fast", retries=2,
+            prompt, temperature=0.3, max_tokens=600, task="judge", retries=2,
         )
         goal_progress = data.get("goal_progress", "none")
         goal_achieved = goal_progress == "achieved"
@@ -252,9 +291,70 @@ async def _combined_eval_generate(
             next_msg = None
 
         return next_msg, new_state, response_type, goal_achieved
-    except Exception:
-        # Fallback: assume partial progress, keep going
-        return None, ConversationState.SATISFIED, ResponseType.VAGUE, False
+    except Exception as e:
+        print(f"[ConversationRunner] Persona turn eval failed for '{persona.name}' — ending conversation. Error: {e}")
+        return None, ConversationState.ABANDONED, ResponseType.VAGUE, False
+
+
+async def run_ground_truth_conversations(
+    ground_truth: list,
+    config: RunConfig,
+    project_id: str = "",
+) -> List[Conversation]:
+    """
+    Stream 2: Send ground truth questions directly to the RAG endpoint.
+    No personas, no state machine — one question → one answer per pair.
+    Returns one Conversation per ground truth pair (skips pairs with no question).
+    """
+    adapter = RAGAdapter(
+        endpoint_url=config.endpoint_url,
+        request_field=config.request_field,
+        response_field=config.response_field,
+        auth_type=config.auth_type,
+        auth_token=config.auth_token,
+        timeout=getattr(config, "adapter_timeout", 60),
+        request_template=getattr(config, "request_template", None),
+        response_trim_marker=getattr(config, "response_trim_marker", None),
+    )
+
+    sem = asyncio.Semaphore(3)
+
+    async def _run_one(pair: dict) -> Optional[Conversation]:
+        question = pair.get("question", "").strip()
+        expected = pair.get("expected_answer", "").strip()
+        if not question:
+            return None
+
+        async with sem:
+            resp: AdapterResponse = await adapter.send(question)
+
+        turn = ConversationTurn(
+            turn_number=1,
+            query=question,
+            response=resp.text if resp.ok else f"[Error: {resp.error}]",
+            latency_ms=resp.latency_ms,
+            expected_answer=expected or None,
+            retrieved_context=resp.retrieved_context,
+            is_error_response=not resp.ok,
+            timestamp=datetime.utcnow(),
+        )
+
+        conv = Conversation(
+            project_id=project_id,
+            persona_id="ground_truth_stream",
+            persona_name="Ground Truth",
+            test_class=TestClass.FUNCTIONAL,
+        )
+        conv.turns.append(turn)
+        conv.total_latency_ms = resp.latency_ms
+        conv.goal_achieved = resp.ok
+        conv.ended_at = datetime.utcnow()
+        return conv
+
+    raw = await asyncio.gather(*[_run_one(pair) for pair in ground_truth])
+    results = [c for c in raw if c is not None]
+    print(f"[GroundTruthStream] {len(results)}/{len(ground_truth)} conversations completed")
+    return results
 
 
 async def run_all_conversations(
@@ -279,9 +379,15 @@ async def run_all_conversations(
         2
     ))
 
-    total = len(ordered)
+    functional_prompts = [p for p in ordered if p.test_class != TestClass.SECURITY]
+    security_prompts   = [p for p in ordered if p.test_class == TestClass.SECURITY]
+
+    total     = len(ordered)
     completed = 0
-    sem = asyncio.Semaphore(3)  # max 3 concurrent conversations — avoids overwhelming target endpoint
+    results: List[Conversation] = []
+
+    # ── Functional / Performance: concurrent (up to 3 in parallel) ────────────
+    sem = asyncio.Semaphore(3)
 
     async def _run_one(prompt):
         nonlocal completed
@@ -295,5 +401,23 @@ async def run_all_conversations(
             progress_callback(completed, total, conv)
         return conv
 
-    raw = await asyncio.gather(*[_run_one(p) for p in ordered])
-    return [c for c in raw if c is not None]
+    func_raw = await asyncio.gather(*[_run_one(p) for p in functional_prompts])
+    results.extend(c for c in func_raw if c is not None)
+
+    # ── Security probes: sequential with 1s delay (Fix 25) ────────────────────
+    # Prevents WAF/IP bans from rapid-fire adversarial traffic bursts.
+    probe_delay = getattr(config, "security_probe_delay_s", 1.0)
+    for i, prompt in enumerate(security_prompts):
+        persona = persona_map.get(prompt.persona_id)
+        if not persona:
+            continue
+        conv = await run_conversation(persona, prompt, config, llm_client, project_id)
+        completed += 1
+        if progress_callback:
+            progress_callback(completed, total, conv)
+        results.append(conv)
+        # Delay between probes (skip after last one)
+        if i < len(security_prompts) - 1:
+            await asyncio.sleep(probe_delay)
+
+    return results

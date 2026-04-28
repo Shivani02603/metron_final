@@ -71,14 +71,141 @@ def generate_html_report(report: AggregatedReport) -> str:
     failure_rows = ""
     for f in report.failure_drill_down[:10]:
         score_pct = int(f["score"] * 100)
+        tax_id    = f.get("failure_taxonomy_id", "")
+        tax_label = f.get("failure_taxonomy_label", "")
+        fail_rsn  = f.get("failure_reason", "")
+        # taxonomy badge + reason cell
+        if tax_id and tax_label:
+            rsn_html = (
+                "<br><span style=\"font-size:11px;color:#555\">" + fail_rsn[:200] + "</span>"
+                if fail_rsn else ""
+            )
+            reason_cell = (
+                '<span style="display:inline-block;background:#ede7f6;color:#6200ee;'
+                'border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;margin-bottom:4px">'
+                + tax_id + " · " + tax_label + "</span>" + rsn_html
+            )
+        else:
+            reason_cell = f.get("reason", "")[:150]
         failure_rows += f"""
         <tr>
           <td>{f.get('superset','')}</td>
           <td>{f.get('metric_name','')}</td>
           <td>{f.get('persona_name','')}</td>
           <td style="color:{'#ba1a1a' if score_pct<50 else '#ff8c00'}">{score_pct}%</td>
-          <td style="max-width:300px;word-wrap:break-word">{f.get('reason','')[:150]}</td>
+          <td style="max-width:320px;word-wrap:break-word">{reason_cell}</td>
         </tr>"""
+
+    # RCA section
+    rca_section = ""
+    if report.rca and report.rca.top_causes:
+        rca = report.rca
+
+        # Architecture summary pills
+        arch = rca.architecture_summary
+        arch_pills = ""
+        pill_items = [
+            ("App Type",       arch.get("application_type", "—").replace("_", " ").title()),
+            ("Deployment",     arch.get("deployment_type", "unknown").title()),
+            ("Vector DB",      arch.get("vector_db", "none").title() if arch.get("vector_db") else "None"),
+            ("Session DB",     arch.get("session_db", "none").title() if arch.get("session_db") else "None"),
+            ("Rate Limiting",  "Yes" if arch.get("has_rate_limiting") else "No"),
+            ("Retry Logic",    "Yes" if arch.get("has_retry_logic") else "No"),
+            ("Circuit Breaker","Yes" if arch.get("has_circuit_breaker") else "No"),
+        ]
+        for pill_label, pill_val in pill_items:
+            ok = pill_val not in ("No", "None", "Unknown")
+            pill_color = "#d4edda" if ok else "#f8d7da"
+            txt_color  = "#006e2f" if ok else "#ba1a1a"
+            arch_pills += f'<span style="display:inline-block;background:{pill_color};color:{txt_color};border-radius:20px;padding:3px 10px;font-size:11px;font-weight:700;margin:2px 4px 2px 0">{pill_label}: {pill_val}</span>'
+
+        # Signal summary badges
+        signals_html = ""
+        for sig_key, count in sorted(rca.signal_summary.items(), key=lambda x: -x[1])[:8]:
+            signals_html += f'<span style="display:inline-block;background:#fff3cd;color:#856404;border-radius:20px;padding:3px 10px;font-size:11px;font-weight:600;margin:2px 4px 2px 0">{sig_key.replace("_", " ")} ({count})</span>'
+
+        # Root cause cards
+        cause_cards = ""
+        for cause in rca.top_causes:
+            prob_pct = int(cause.probability * 100)
+            if prob_pct >= 70:
+                prob_color = "#ba1a1a"
+                prob_bg    = "#f8d7da"
+                prob_label = "HIGH"
+            elif prob_pct >= 45:
+                prob_color = "#ff8c00"
+                prob_bg    = "#fff3cd"
+                prob_label = "MEDIUM"
+            else:
+                prob_color = "#00668a"
+                prob_bg    = "#d1ecf1"
+                prob_label = "LOW"
+
+            # Category badge color
+            cat_colors = {
+                "C1": ("#6200ee", "#ede7f6"),
+                "C2": ("#00668a", "#d1ecf1"),
+                "C3": ("#e65100", "#fff3e0"),
+                "C4": ("#ba1a1a", "#f8d7da"),
+                "C5": ("#1b5e20", "#d4edda"),
+                "C6": ("#f57f17", "#fff9c4"),
+                "C7": ("#4a148c", "#f3e5f5"),
+                "C8": ("#37474f", "#eceff1"),
+            }
+            cat_fg, cat_bg = cat_colors.get(cause.category_id, ("#333", "#eee"))
+
+            evidence_items = "".join(
+                f'<li style="margin:2px 0;font-size:12px;color:#555">{e}</li>'
+                for e in cause.evidence[:3]
+            )
+
+            bar_width = max(4, prob_pct)
+
+            cause_cards += f"""
+        <div style="border:1px solid #e0e0e0;border-radius:10px;padding:14px 16px;margin-bottom:12px;background:#fafafa">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+            <div style="flex:1">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+                <span style="font-size:12px;font-weight:800;color:#888">#{cause.rank}</span>
+                <span style="background:{cat_bg};color:{cat_fg};border-radius:4px;padding:1px 7px;font-size:11px;font-weight:700">{cause.category}</span>
+                <span style="font-size:11px;color:#888;font-family:monospace">{cause.id}</span>
+              </div>
+              <div style="font-size:14px;font-weight:700;color:#1c1b1f;margin-bottom:6px">{cause.label}</div>
+              <ul style="margin:0 0 6px 14px;padding:0">{evidence_items}</ul>
+              {f'<div style="font-size:12px;color:#444;line-height:1.6;margin-top:6px;padding:6px 10px;background:#f5f5f5;border-radius:6px;border-left:3px solid #bbb">{cause.reason}</div>' if cause.reason else ''}
+              <div style="font-size:12px;background:#e8f5e9;color:#1b5e20;border-radius:6px;padding:5px 9px;margin-top:6px">
+                <strong>Fix:</strong> {cause.remediation}
+              </div>
+            </div>
+            <div style="text-align:center;min-width:72px">
+              <div style="background:{prob_bg};color:{prob_color};border-radius:8px;padding:6px 10px;font-size:22px;font-weight:900;line-height:1">{prob_pct}%</div>
+              <div style="font-size:10px;font-weight:800;color:{prob_color};letter-spacing:0.06em;margin-top:2px">{prob_label}</div>
+              <div style="margin-top:6px;background:#e0e0e0;border-radius:4px;height:6px;width:72px">
+                <div style="background:{prob_color};height:6px;border-radius:4px;width:{bar_width}%"></div>
+              </div>
+            </div>
+          </div>
+        </div>"""
+
+        rca_section = f"""
+    <div class="card" style="border-left:4px solid #6200ee">
+      <h2 style="color:#6200ee">Root Cause Analysis (Stage 8)</h2>
+      <p style="font-size:13px;opacity:0.7;margin:0 0 14px">
+        Analysed <strong>{rca.total_analyzed}</strong> evaluation results ·
+        <strong>{rca.total_failed}</strong> failures mapped ·
+        <strong>{rca.relevant_points}</strong> / {rca.relevant_points + rca.filtered_points} failure points relevant after architecture filter
+      </p>
+
+      <div style="margin-bottom:16px">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;opacity:0.55;margin-bottom:6px">Architecture Profile</div>
+        {arch_pills}
+      </div>
+
+      {'<div style="margin-bottom:16px"><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;opacity:0.55;margin-bottom:6px">Observed Failure Signals</div>' + signals_html + '</div>' if signals_html else ''}
+
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;opacity:0.55;margin-bottom:10px">Top Probable Root Causes</div>
+      {cause_cards}
+    </div>"""
 
     # Persona breakdown rows
     persona_rows = ""
@@ -137,7 +264,7 @@ def generate_html_report(report: AggregatedReport) -> str:
   <div class="container">
     <div class="header">
       <h1>METRON Test Report</h1>
-      <p>{report.agent_name if hasattr(report, 'agent_name') else report.domain.capitalize()} · {report.application_type.value.replace('_',' ').title()} · {ts}</p>
+      <p>{report.agent_name or report.domain.capitalize()} · {report.application_type.value.replace('_',' ').title()} · {ts}</p>
     </div>
 
     <div class="card">
@@ -188,6 +315,8 @@ def generate_html_report(report: AggregatedReport) -> str:
         <tbody>{failure_rows if failure_rows else '<tr><td colspan="5" style="text-align:center;opacity:0.5">No failures — all tests passed!</td></tr>'}</tbody>
       </table>
     </div>
+
+    {rca_section}
 
     {'<div class="card" style="border:2px solid #00668a"><h2>Adaptive Feedback Applied</h2><p style="font-size:13px;opacity:0.7">The feedback loop generated new targeted personas based on failure patterns and re-ran tests. Results above include both initial and feedback runs.</p></div>' if report.feedback_applied else ''}
 

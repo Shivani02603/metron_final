@@ -640,6 +640,18 @@ async def get_project(project_id: str, request: Request):
     return project
 
 
+@app.delete("/api/projects/{project_id}")
+async def delete_project(project_id: str, request: Request):
+    user = get_current_user(request)
+    project = _db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.get("user_email") != user["email"]:
+        raise HTTPException(status_code=403, detail="Not your project")
+    _db.delete_project(project_id)
+    return {"ok": True}
+
+
 # ── Helper ─────────────────────────────────────────────────────────────────
 def _env_key_set(provider_name: str) -> bool:
     env_key = LLM_PROVIDERS.get(provider_name, {}).get("env_key", "")

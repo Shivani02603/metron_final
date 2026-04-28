@@ -291,3 +291,18 @@ def get_project(project_id: str) -> Optional[Dict[str, Any]]:
             return dict(row) if row else None
         finally:
             conn.close()
+
+
+def delete_project(project_id: str) -> bool:
+    """Delete a project and all its runs. Returns True if the project existed."""
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                "DELETE FROM projects WHERE project_id = ?", (project_id,)
+            )
+            conn.execute("DELETE FROM runs WHERE project_id = ?", (project_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()

@@ -26,6 +26,8 @@ export default function ProjectHub() {
   const [submitError, setSubmitError] = useState("");
 
   const [projects, setProjects] = useState<Project[]>([]);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Load persisted projects from API on mount
   useEffect(() => {
@@ -133,6 +135,23 @@ export default function ProjectHub() {
     }
   };
 
+  const handleDeleteProject = async (projectId: string) => {
+    setIsDeleting(true);
+    try {
+      await fetch(`/api/projects/${projectId}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      setProjects((prev) => prev.filter((p) => p.id !== projectId));
+      sessionStorage.removeItem(`project_${projectId}`);
+    } catch {
+      // silently ignore — tile stays if request fails
+    } finally {
+      setIsDeleting(false);
+      setConfirmDeleteId(null);
+    }
+  };
+
   return (
     <>
     <div className="space-y-10 animate-fade-in max-w-7xl mx-auto pb-20">
@@ -171,7 +190,7 @@ export default function ProjectHub() {
         {projects.map((proj) => (
           <div
             key={proj.id}
-            onClick={() => handleProjectClick(proj.id)}
+            onClick={() => confirmDeleteId === proj.id ? null : handleProjectClick(proj.id)}
             className="group relative p-8 rounded-[2.5rem] bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] border-opacity-20 shadow-card hover:shadow-card-lg transition-all cursor-pointer overflow-hidden animate-fade-in"
           >
             <div className="absolute inset-0 bg-gradient-to-br from-primary/0 to-primary/3 opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -182,9 +201,39 @@ export default function ProjectHub() {
                     {proj.type === "RAG System" ? "database" : proj.type === "Chatbot" ? "forum" : "hub"}
                   </span>
                 </div>
-                <div className="px-3 py-1.5 rounded-full bg-[#6bff8f]/10 border border-[#6bff8f]/20 flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#006e2f] pulse-orb" />
-                  <span className="text-[9px] font-black uppercase tracking-widest text-[#006e2f]">{proj.status}</span>
+                <div className="flex items-center gap-2">
+                  {confirmDeleteId === proj.id ? (
+                    <div className="flex items-center gap-2 animate-fade-in" onClick={(e) => e.stopPropagation()}>
+                      <span className="text-[10px] font-black text-red-500 uppercase tracking-wider">Delete?</span>
+                      <button
+                        disabled={isDeleting}
+                        onClick={() => handleDeleteProject(proj.id)}
+                        className="px-3 py-1.5 rounded-xl bg-red-500 text-white text-[10px] font-black uppercase tracking-wider hover:bg-red-600 transition-colors disabled:opacity-50"
+                      >
+                        {isDeleting ? "..." : "Yes"}
+                      </button>
+                      <button
+                        onClick={() => setConfirmDeleteId(null)}
+                        className="px-3 py-1.5 rounded-xl bg-[var(--color-surface-container-low)] text-[var(--color-on-surface)] text-[10px] font-black uppercase tracking-wider hover:bg-[var(--color-surface-variant)] transition-colors"
+                      >
+                        No
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(proj.id); }}
+                        className="w-9 h-9 rounded-xl flex items-center justify-center text-[var(--color-outline)] opacity-0 group-hover:opacity-100 hover:bg-red-50 hover:text-red-500 transition-all"
+                        title="Delete project"
+                      >
+                        <span className="material-symbols-outlined text-lg">delete</span>
+                      </button>
+                      <div className="px-3 py-1.5 rounded-full bg-[#6bff8f]/10 border border-[#6bff8f]/20 flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-[#006e2f] pulse-orb" />
+                        <span className="text-[9px] font-black uppercase tracking-widest text-[#006e2f]">{proj.status}</span>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
               <div className="space-y-1.5">

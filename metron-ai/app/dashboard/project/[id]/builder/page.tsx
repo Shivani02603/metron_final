@@ -71,6 +71,7 @@ export default function NodeBuilder() {
       formData.append(
         "config",
         JSON.stringify({
+          project_id: projectId,
           endpoint_url: config.endpoint,
           request_field: inputField || "message",
           response_field: outputField || "response",
@@ -108,7 +109,8 @@ export default function NodeBuilder() {
         }
 
         const { run_id } = await res.json();
-        router.push(`/dashboard/project/${run_id}/analysis`);
+        sessionStorage.setItem(`run_id_${projectId}`, run_id);
+        router.push(`/dashboard/project/${projectId}/run`);
       } catch (fetchError) {
         clearTimeout(timeoutId);
         if (fetchError instanceof Error && fetchError.name === 'AbortError') {

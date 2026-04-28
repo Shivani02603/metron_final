@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 
 interface Project {
@@ -27,6 +27,27 @@ export default function ProjectHub() {
 
   const [projects, setProjects] = useState<Project[]>([]);
 
+  // Load persisted projects from API on mount
+  useEffect(() => {
+    fetch("/api/projects", { credentials: "include" })
+      .then((r) => r.json())
+      .then((data) => {
+        if (!data.projects) return;
+        setProjects(
+          data.projects.map((p: { project_id: string; name: string; endpoint: string }) => ({
+            id: p.project_id,
+            name: p.name || p.endpoint,
+            endpoint: p.endpoint,
+            status: "Ready",
+            runs: 0,
+            lastScore: "---",
+            type: "AI System",
+          }))
+        );
+      })
+      .catch(() => {});
+  }, []);
+
   const handleProjectClick = (projectId: string) => {
     router.push(`/dashboard/project/${projectId}`);
   };
@@ -42,26 +63,44 @@ export default function ProjectHub() {
     setSubmitError("");
 
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       const tempId = Date.now().toString();
-      sessionStorage.setItem(
-        `project_${tempId}`,
-        JSON.stringify({
-          name: projectName || projectEndpoint,
-          endpoint: projectEndpoint,
-          apiKey: apiKey,
-          documentText: reader.result as string,
-          documentName: uploadedFile.name,
-        })
-      );
+      const projectData = {
+        name: projectName || projectEndpoint,
+        endpoint: projectEndpoint,
+        apiKey: apiKey,
+        documentText: reader.result as string,
+        documentName: uploadedFile!.name,
+      };
 
-      // Add to projects grid for display
+      // Write to sessionStorage for current session sub-pages
+      sessionStorage.setItem(`project_${tempId}`, JSON.stringify(projectData));
+
+      // Persist to server so it survives logout/login
+      try {
+        await fetch("/api/projects", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            project_id: tempId,
+            name: projectData.name,
+            endpoint: projectData.endpoint,
+            api_key: projectData.apiKey,
+            document_text: projectData.documentText,
+            document_name: projectData.documentName,
+          }),
+        });
+      } catch {
+        // Non-fatal — session still works
+      }
+
       setProjects((prev) => [
         ...prev,
         {
           id: tempId,
-          name: projectName || projectEndpoint,
-          endpoint: projectEndpoint,
+          name: projectData.name,
+          endpoint: projectData.endpoint,
           status: "Ready",
           runs: 0,
           lastScore: "---",
@@ -76,7 +115,6 @@ export default function ProjectHub() {
       setApiKey("");
       setUploadedFile(null);
 
-      // Go to splitter — user picks Full Suite or Custom there
       router.push(`/dashboard/project/${tempId}`);
     };
 

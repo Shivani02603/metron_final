@@ -420,6 +420,7 @@ async def run_tests(
     # Fix 29: project_id comes from config (set by UI from dashboard [id]) or defaults to run_id
     project_id = run_config.project_id or run_id
 
+    from datetime import datetime as _dt
     # Fix 22: job store contains NO API keys — only status/progress/config summary
     jobs[run_id] = {
         "status":        "queued",
@@ -430,6 +431,8 @@ async def run_tests(
         "log_events":    [],
         "error":         None,
         "results":       None,
+        "project_id":    project_id,
+        "timestamp":     _dt.utcnow().isoformat(),
         # Safe config summary (no credentials)
         "config_summary": {
             "endpoint_url":    run_config.endpoint_url,
@@ -525,10 +528,29 @@ async def health():
 # ──────────────────────────────────────────────────────────────────────────
 @app.get("/api/project/{project_id}/runs")
 async def get_project_runs(project_id: str):
-    """Return all completed runs for a project, sorted newest-first."""
+    """Return all runs for a project: DB rows + any in-memory runs not yet persisted."""
     try:
-        runs = _db.get_runs_for_project(project_id)
-        return {"project_id": project_id, "runs": runs}
+        db_runs = _db.get_runs_for_project(project_id)
+        db_run_ids = {r["run_id"] for r in db_runs}
+
+        # Include in-memory runs not yet saved to DB (e.g. if save_run failed)
+        mem_runs = []
+        for rid, job in jobs.items():
+            if job.get("project_id") != project_id or rid in db_run_ids:
+                continue
+            results = job.get("results") or {}
+            mem_runs.append({
+                "run_id":           rid,
+                "project_id":       project_id,
+                "timestamp":        job.get("timestamp", ""),
+                "health_score":     results.get("health_score"),
+                "domain":           job.get("config_summary", {}).get("agent_domain", ""),
+                "application_type": job.get("config_summary", {}).get("application_type", ""),
+                "status":           job["status"],
+            })
+
+        all_runs = sorted(db_runs + mem_runs, key=lambda r: r.get("timestamp", ""), reverse=True)
+        return {"project_id": project_id, "runs": all_runs}
     except Exception as e:
         raise HTTPException(500, f"DB error: {e}")
 
@@ -579,6 +601,43 @@ async def auth_logout():
 @app.get("/api/auth/me")
 async def auth_me(request: Request):
     return get_current_user(request)
+
+
+# ── Project persistence endpoints ───────────────────────────────────────────
+
+class _ProjectBody(BaseModel):
+    project_id: str
+    name: str
+    endpoint: str
+    api_key: str = ""
+    document_text: str = ""
+    document_name: str = ""
+
+
+@app.post("/api/projects")
+async def create_project(body: _ProjectBody, request: Request):
+    user = get_current_user(request)
+    _db.save_project(
+        body.project_id, user["email"], body.name, body.endpoint,
+        body.api_key, body.document_text, body.document_name,
+    )
+    return {"ok": True}
+
+
+@app.get("/api/projects")
+async def list_projects(request: Request):
+    user = get_current_user(request)
+    projects = _db.get_projects_for_user(user["email"])
+    return {"projects": projects}
+
+
+@app.get("/api/projects/{project_id}")
+async def get_project(project_id: str, request: Request):
+    get_current_user(request)
+    project = _db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
 
 
 # ── Helper ─────────────────────────────────────────────────────────────────

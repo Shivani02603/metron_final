@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 const API = "";
 
@@ -157,6 +157,7 @@ interface FullResults {
 export default function ResultsPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const projectId = params.id as string;
 
   const [results, setResults] = useState<FullResults | null>(null);
@@ -165,7 +166,8 @@ export default function ResultsPage() {
   const [activeTab, setActiveTab] = useState(0);
 
   useEffect(() => {
-    const runId = sessionStorage.getItem(`run_id_${projectId}`);
+    const runId =
+      searchParams.get("run") || sessionStorage.getItem(`run_id_${projectId}`);
     if (!runId) {
       setError("No run ID found. Please run the test suite first.");
       setLoading(false);

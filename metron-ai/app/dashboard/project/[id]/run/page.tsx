@@ -512,7 +512,7 @@ export default function RunPage() {
       {status === "completed" && (
         <div className="flex justify-center pt-4">
           <button
-            onClick={() => router.push(`/dashboard/project/${projectId}/results`)}
+            onClick={() => router.push(`/dashboard/project/${projectId}/results${runId ? `?run=${runId}` : ""}`)}
             className="group flex items-center gap-3 px-10 py-4 rounded-2xl btn-primary text-sm shadow-xl shadow-primary/10"
           >
             <span className="material-symbols-outlined text-xl">bar_chart</span>

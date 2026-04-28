@@ -8,6 +8,8 @@ Fix 21: On server startup, recently completed jobs are re-populated into the
 Schema:
   runs(run_id TEXT PK, project_id TEXT, timestamp TEXT, health_score REAL,
        domain TEXT, application_type TEXT, status TEXT, results_json TEXT)
+  projects(project_id TEXT PK, user_email TEXT, name TEXT, endpoint TEXT,
+           api_key TEXT, document_text TEXT, document_name TEXT, created_at TEXT)
 
 DB path defaults to ./metron_runs.db; override via METRON_DB_PATH env var.
 """
@@ -20,7 +22,7 @@ import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-_DB_PATH_DEFAULT = "./metron_runs.db"
+_DB_PATH_DEFAULT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "metron_runs.db"))
 _lock = threading.Lock()
 
 
@@ -53,6 +55,19 @@ def init_db() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_timestamp ON runs(timestamp)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS projects (
+                    project_id    TEXT PRIMARY KEY,
+                    user_email    TEXT NOT NULL,
+                    name          TEXT,
+                    endpoint      TEXT,
+                    api_key       TEXT,
+                    document_text TEXT,
+                    document_name TEXT,
+                    created_at    TEXT NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_email)")
             conn.commit()
         finally:
             conn.close()
@@ -215,5 +230,64 @@ def load_recent_jobs(hours: int = 24) -> List[Dict[str, Any]]:
                         d.pop("results_json", None)
                 result.append(d)
             return result
+        finally:
+            conn.close()
+
+
+# ── Project persistence ───────────────────────────────────────────────────────
+
+def save_project(
+    project_id: str,
+    user_email: str,
+    name: str,
+    endpoint: str,
+    api_key: str,
+    document_text: str,
+    document_name: str,
+) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO projects
+                    (project_id, user_email, name, endpoint, api_key,
+                     document_text, document_name, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (project_id, user_email, name, endpoint, api_key,
+                 document_text, document_name, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_projects_for_user(user_email: str) -> List[Dict[str, Any]]:
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT project_id, name, endpoint, document_name, created_at
+                FROM projects
+                WHERE user_email = ?
+                ORDER BY created_at DESC
+                """,
+                (user_email,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
+def get_project(project_id: str) -> Optional[Dict[str, Any]]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+            ).fetchone()
+            return dict(row) if row else None
         finally:
             conn.close()

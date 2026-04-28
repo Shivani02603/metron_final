@@ -46,5 +46,9 @@ datasets>=2.14.0
 torch>=2.0.0            # required by detoxify
 sentence-transformers>=2.6.0   # cosine similarity for RAG answer correctness
 
+# ── Auth: password hashing + JWT ─────────────────────────────────────────────
+bcrypt>=4.0.0
+python-jose[cryptography]>=3.3.0
+
 # ── Optional: document parsing ───────────────────────────────────────────────
 # PyPDF2>=3.0.0

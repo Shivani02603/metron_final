@@ -10,9 +10,15 @@ import os
 import uuid
 from typing import Any, Dict, Optional
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+load_dotenv()
 
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from core.auth import authenticate_user, create_token, get_cookie_params, get_current_user, COOKIE_NAME
 from core.config import CORS_ORIGINS, LLM_PROVIDERS
 from core.llm_client import LLMClient
 from core.models import (
@@ -542,6 +548,37 @@ async def compare_runs(run_id_a: str, run_id_b: str):
         raise
     except Exception as e:
         raise HTTPException(500, f"Compare error: {e}")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Auth endpoints
+# ──────────────────────────────────────────────────────────────────────────
+class _LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/api/auth/login")
+async def auth_login(body: _LoginRequest):
+    user = authenticate_user(body.email, body.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = create_token(user["email"])
+    resp = JSONResponse({"ok": True, "email": user["email"]})
+    resp.set_cookie(value=token, **get_cookie_params())
+    return resp
+
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(key=COOKIE_NAME, path="/")
+    return resp
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    return get_current_user(request)
 
 
 # ── Helper ─────────────────────────────────────────────────────────────────

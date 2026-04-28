@@ -72,7 +72,7 @@ interface JobStatus {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const BACKEND = "http://localhost:8000";
+const BACKEND = "";
 
 const pct = (n: number) => `${Math.round(n * 100)}%`;
 const score2pct = (n: number | undefined) =>

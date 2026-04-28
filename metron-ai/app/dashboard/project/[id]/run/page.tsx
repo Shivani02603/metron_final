@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 
-const API = "http://localhost:8000";
+const API = "";
 const POLL_INTERVAL = 2500;
 
 const METRIC_LABELS: Record<string, string> = {

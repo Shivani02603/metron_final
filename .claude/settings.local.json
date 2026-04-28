@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d.get\\('version','?'\\)\\)\")",
+      "Bash(node -e \"const p=require\\('./metron-ai/node_modules/next/package.json'\\); console.log\\(p.version\\)\")",
+      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\); console.log\\(JSON.parse\\(d\\).dependencies.next\\)\")",
+      "Bash(.venv/Scripts/pip install *)"
+    ]
+  }
+}

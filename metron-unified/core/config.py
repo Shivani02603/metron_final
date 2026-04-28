@@ -117,9 +117,17 @@ THRESHOLDS = {
 }
 
 # ── CORS ───────────────────────────────────────────────────────────────────
+# Add your EC2 IP or domain via the CORS_ORIGINS env var (comma-separated).
+# Example: CORS_ORIGINS=http://1.2.3.4,https://yourdomain.com
+_extra_origins = [
+    o.strip()
+    for o in os.environ.get("CORS_ORIGINS", "").split(",")
+    if o.strip()
+]
 CORS_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    *_extra_origins,
 ]
 
 # ── Helper: resolve API key from env or explicit value ─────────────────────

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 export default function DashboardLayout({
   children,
@@ -12,9 +12,18 @@ export default function DashboardLayout({
   const pathname = usePathname();
   const router = useRouter();
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [userEmail, setUserEmail] = useState("");
 
-  const handleLogout = () => {
-    router.push("/");
+  useEffect(() => {
+    fetch("/api/auth/me", { credentials: "include" })
+      .then((r) => r.json())
+      .then((data) => setUserEmail(data.email ?? ""))
+      .catch(() => {});
+  }, []);
+
+  const handleLogout = async () => {
+    await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+    window.location.href = "/";
   };
 
   const navLinks = [
@@ -84,12 +93,11 @@ export default function DashboardLayout({
         <div className={`p-4 border-t border-[var(--color-outline-variant)] border-opacity-10 ${isCollapsed ? 'px-2' : ''}`}>
           <div className={`flex items-center gap-3 p-2.5 rounded-2xl bg-[var(--color-surface-container-low)] transition-all ${isCollapsed ? 'justify-center rounded-xl px-0' : ''}`}>
             <div className="w-10 h-10 min-w-[40px] rounded-full bg-gradient-to-br from-[#00668a] to-[#38bdf8] flex items-center justify-center text-white text-xs font-bold ring-2 ring-white shadow-sm">
-              SJ
+              {userEmail ? userEmail[0].toUpperCase() : "?"}
             </div>
             {!isCollapsed && (
               <div className="flex-1 overflow-hidden animate-fade-in">
-                <p className="text-xs font-black text-[var(--color-on-surface)] truncate">Shivani J.</p>
-                <p className="text-[9px] font-bold text-primary uppercase tracking-widest opacity-60">Admin</p>
+                <p className="text-xs font-black text-[var(--color-on-surface)] truncate">{userEmail}</p>
               </div>
             )}
             {!isCollapsed && (

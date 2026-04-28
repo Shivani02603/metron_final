@@ -95,7 +95,7 @@ export default function NodeBuilder() {
       const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout for backend response
 
       try {
-        const res = await fetch("http://localhost:8000/api/run", {
+        const res = await fetch("/api/run", {
           method: "POST",
           body: formData,
           signal: controller.signal,

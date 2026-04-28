@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
 
-const API = "http://localhost:8000";
+const API = "";
 
 interface Persona {
   id: string;

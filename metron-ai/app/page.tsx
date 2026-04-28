@@ -9,14 +9,28 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError("");
-    setTimeout(() => {
-      setLoading(false);
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.detail || "Invalid email or password");
+        setLoading(false);
+        return;
+      }
       window.location.href = "/dashboard";
-    }, 1500);
+    } catch {
+      setError("Could not reach the server. Please try again.");
+      setLoading(false);
+    }
   };
 
   return (
@@ -126,6 +140,12 @@ export default function LoginPage() {
             <div className="flex justify-end pt-1">
               <a href="#" className="text-xs font-bold text-[var(--color-primary)] hover:text-[var(--color-primary-container)] transition-colors">Forgot password?</a>
             </div>
+
+            {error && (
+              <p className="text-sm font-semibold text-red-500 bg-red-50 px-4 py-3 rounded-xl">
+                {error}
+              </p>
+            )}
 
             <button
               type="submit"

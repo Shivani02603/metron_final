@@ -1,0 +1,10 @@
+[
+  {
+    "email": "admin@yourcompany.com",
+    "password": "change-this-password"
+  },
+  {
+    "email": "user@yourcompany.com",
+    "password": "change-this-too"
+  }
+]

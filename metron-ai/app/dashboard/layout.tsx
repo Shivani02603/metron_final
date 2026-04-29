@@ -16,10 +16,16 @@ export default function DashboardLayout({
 
   useEffect(() => {
     fetch("/api/auth/me", { credentials: "include" })
-      .then((r) => r.json())
-      .then((data) => setUserEmail(data.email ?? ""))
-      .catch(() => {});
-  }, []);
+      .then((r) => {
+        if (r.status === 401) {
+          router.replace("/");
+          return null;
+        }
+        return r.json();
+      })
+      .then((data) => { if (data) setUserEmail(data.email ?? ""); })
+      .catch(() => router.replace("/"));
+  }, [router]);
 
   const handleLogout = async () => {
     await fetch("/api/auth/logout", { method: "POST", credentials: "include" });

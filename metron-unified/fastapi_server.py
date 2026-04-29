@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from core.auth import authenticate_user, create_token, get_cookie_params, get_current_user, COOKIE_NAME
+from core.auth import authenticate_user, create_token, get_cookie_params, get_current_user, COOKIE_NAME, _SECURE_COOKIE
 from core.config import CORS_ORIGINS, LLM_PROVIDERS
 from core.llm_client import LLMClient
 from core.models import (
@@ -165,7 +165,8 @@ async def get_tools_status():
 # POST /api/connect-test — test chatbot endpoint connectivity
 # ──────────────────────────────────────────────────────────────────────────
 @app.post("/api/connect-test")
-async def connect_test(req: ConnectTestRequest):
+async def connect_test(req: ConnectTestRequest, request: Request):
+    get_current_user(request)
     adapter = ChatbotAdapter(
         endpoint_url=req.endpoint_url,
         request_field=req.request_field,
@@ -183,7 +184,8 @@ async def connect_test(req: ConnectTestRequest):
 # POST /api/parse-document — NEW: seed doc → AppProfile
 # ──────────────────────────────────────────────────────────────────────────
 @app.post("/api/parse-document")
-async def parse_document_endpoint(req: ParseDocumentRequest):
+async def parse_document_endpoint(req: ParseDocumentRequest, request: Request):
+    get_current_user(request)
     if not req.document_text.strip():
         raise HTTPException(400, "document_text is required")
     if not req.llm_api_key and not _env_key_set(req.llm_provider):
@@ -208,11 +210,13 @@ async def parse_document_endpoint(req: ParseDocumentRequest):
 # ──────────────────────────────────────────────────────────────────────────
 @app.post("/api/parse-architecture")
 async def parse_architecture_endpoint(
+    request:      Request,
     content:      str           = Form(""),
     image:        Optional[UploadFile] = File(None),
     llm_provider: str           = Form("Groq"),
     llm_api_key:  str           = Form(""),
 ):
+    get_current_user(request)
     """
     Parse an architecture document (text) or diagram (image) and return
     structured architecture fields ready to populate the configure form.
@@ -242,7 +246,8 @@ async def parse_architecture_endpoint(
 # POST /api/preview — generate personas + scenarios
 # ──────────────────────────────────────────────────────────────────────────
 @app.post("/api/preview")
-async def preview(req: PreviewRequest):
+async def preview(req: PreviewRequest, request: Request):
+    get_current_user(request)
     if not req.agent_description.strip():
         raise HTTPException(400, "agent_description is required")
     if not req.llm_api_key and not _env_key_set(req.llm_provider):
@@ -300,11 +305,13 @@ async def preview(req: PreviewRequest):
 # ──────────────────────────────────────────────────────────────────────────
 @app.post("/api/run")
 async def run_tests(
+    request: Request,
     background_tasks: BackgroundTasks,
     config: str = Form(...),
     document: Optional[UploadFile] = File(None),
     ground_truth_file: Optional[UploadFile] = File(None),
 ):
+    get_current_user(request)
     import json, csv, io
     try:
         config_data = json.loads(config)
@@ -458,7 +465,8 @@ async def run_tests(
 # GET /api/job/{run_id}/status — poll job status
 # ──────────────────────────────────────────────────────────────────────────
 @app.get("/api/job/{run_id}/status")
-async def get_job_status(run_id: str):
+async def get_job_status(run_id: str, request: Request):
+    get_current_user(request)
     job = jobs.get(run_id)
     if not job:
         # Fix 21: fall back to DB for runs that completed before last restart
@@ -491,7 +499,8 @@ async def get_job_status(run_id: str):
 # GET /api/job/{run_id}/results — fetch completed results
 # ──────────────────────────────────────────────────────────────────────────
 @app.get("/api/job/{run_id}/results")
-async def get_job_results(run_id: str):
+async def get_job_results(run_id: str, request: Request):
+    get_current_user(request)
     job = jobs.get(run_id)
     if not job:
         # Fix 21: fall back to DB
@@ -527,7 +536,8 @@ async def health():
 # GET /api/project/{project_id}/runs — Fix 28: run history for a project
 # ──────────────────────────────────────────────────────────────────────────
 @app.get("/api/project/{project_id}/runs")
-async def get_project_runs(project_id: str):
+async def get_project_runs(project_id: str, request: Request):
+    get_current_user(request)
     """Return all runs for a project: DB rows + any in-memory runs not yet persisted."""
     try:
         db_runs = _db.get_runs_for_project(project_id)
@@ -559,7 +569,8 @@ async def get_project_runs(project_id: str):
 # GET /api/runs/{run_id_a}/compare/{run_id_b} — Fix 28: regression diff
 # ──────────────────────────────────────────────────────────────────────────
 @app.get("/api/runs/{run_id_a}/compare/{run_id_b}")
-async def compare_runs(run_id_a: str, run_id_b: str):
+async def compare_runs(run_id_a: str, run_id_b: str, request: Request):
+    get_current_user(request)
     """Compare health scores and class pass-rates between two runs."""
     try:
         diff = _db.compare_runs(run_id_a, run_id_b)
@@ -594,7 +605,13 @@ async def auth_login(body: _LoginRequest):
 @app.post("/api/auth/logout")
 async def auth_logout():
     resp = JSONResponse({"ok": True})
-    resp.delete_cookie(key=COOKIE_NAME, path="/")
+    resp.delete_cookie(
+        key=COOKIE_NAME,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=_SECURE_COOKIE,
+    )
     return resp
 
 

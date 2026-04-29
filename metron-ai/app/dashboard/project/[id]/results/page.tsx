@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 const API = "";
@@ -155,6 +155,19 @@ interface FullResults {
 
 // ─────────────────────────────── Component ────────────────────────────────────
 export default function ResultsPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex flex-col items-center justify-center h-64 gap-4">
+        <span className="material-symbols-outlined text-4xl text-primary animate-spin">progress_activity</span>
+        <p className="text-sm text-[var(--color-on-surface-variant)] opacity-60">Loading results…</p>
+      </div>
+    }>
+      <ResultsContent />
+    </Suspense>
+  );
+}
+
+function ResultsContent() {
   const params = useParams();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -174,7 +187,7 @@ export default function ResultsPage() {
       return;
     }
 
-    fetch(`${API}/api/job/${runId}/results`)
+    fetch(`${API}/api/job/${runId}/results`, { credentials: "include" })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();

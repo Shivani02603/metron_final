@@ -59,42 +59,37 @@ export default function LoginPage() {
       });
 
       if (output.isSignedIn) {
-        console.log("[Login] Sign-in successful, checking localStorage for tokens...");
-        const storageKeys = Object.keys(localStorage);
-        console.log("[Login] localStorage keys count:", storageKeys.length);
+        console.log("[Login] Sign-in successful, waiting for token persistence...");
 
-        // Verify session is accessible
-        try {
-          const session = await fetchAuthSession();
-          console.log("[Login] Session check after signIn:", {
-            hasTokens: !!session.tokens,
-            hasIdToken: !!session.tokens?.idToken,
-            email: session.tokens?.idToken?.payload?.email
-          });
-        } catch (e) {
-          console.error("[Login] Failed to fetch session after signIn:", e);
+        // Give Amplify time to persist tokens to localStorage (up to 2 seconds)
+        let tokensFound = false;
+        for (let i = 0; i < 20; i++) {
+          try {
+            const session = await fetchAuthSession();
+            if (session.tokens?.idToken) {
+              console.log("[Login] Tokens verified in fetchAuthSession:", {
+                email: session.tokens.idToken.payload?.email,
+                hasIdToken: true
+              });
+              tokensFound = true;
+              break;
+            }
+          } catch (e) {
+            console.log("[Login] Retry", i + 1, "- tokens not yet accessible via fetchAuthSession");
+          }
+          // Wait 100ms before retrying
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        if (!tokensFound) {
+          console.warn("[Login] Tokens not found after waiting; proceeding anyway (will be stored soon)");
         }
 
         setLoading(false);
-        console.log("[Login] Tokens confirmed, attempting navigation to /dashboard...");
+        console.log("[Login] Proceeding to navigate to /dashboard...");
 
-        // Try router.push first (Next.js aware)
-        try {
-          console.log("[Login] Attempting router.push('/dashboard')...");
-          router.push("/dashboard");
-
-          // If router.push doesn't work, fallback to window.location.href after short delay
-          setTimeout(() => {
-            if (window.location.pathname === "/") {
-              console.warn("[Login] router.push didn't navigate, trying window.location.href...");
-              window.location.href = "/dashboard";
-            }
-          }, 300);
-        } catch (err) {
-          console.error("[Login] router.push threw error:", err);
-          // If router.push throws, immediately try window.location.href
-          window.location.href = "/dashboard";
-        }
+        // Use window.location.href for hard navigation to ensure fresh page load with tokens
+        window.location.href = "/dashboard";
       } else {
         const msg = `Sign-in incomplete (${output.nextStep?.signInStep ?? "unknown step"}). Check your email for a confirmation code.`;
         console.log("[Login] Sign-in incomplete:", msg);

@@ -15,8 +15,13 @@ export default function DashboardLayout({
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [userEmail, setUserEmail] = useState("");
 
+  console.log("[DashboardLayout] Rendering (not just mounted)", {
+    pathname,
+    timestamp: new Date().toISOString()
+  });
+
   useEffect(() => {
-    console.log("[DashboardLayout] Component mounted, fetching auth session...");
+    console.log("[DashboardLayout] ✓ Component mounted at", new Date().toISOString(), "pathname:", pathname);
     let isMounted = true;
 
     fetchAuthSession()

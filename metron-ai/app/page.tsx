@@ -75,31 +75,48 @@ export default function LoginPage() {
         }
 
         console.log("[Login] About to call router.push('/dashboard')...");
+        console.log("[Login] router object:", {
+          basePath: (router as any).basePath,
+          pathname: (router as any).pathname,
+        });
         setLoading(false);
 
-        // Try with a slight delay to ensure tokens are persisted
-        setTimeout(() => {
-          try {
-            console.log("[Login] Delayed router.push('/dashboard')...");
-            const pushPromise = router.push("/dashboard");
-            console.log("[Login] router.push() returned:", pushPromise);
+        // Direct router.push without delay - Next.js App Router handles this synchronously
+        try {
+          console.log("[Login] Calling router.push('/dashboard')...");
+          const result = router.push("/dashboard");
+          console.log("[Login] ✓ router.push() returned:", {
+            type: typeof result,
+            isPromise: result instanceof Promise,
+            result: result,
+          });
 
-            if (pushPromise instanceof Promise) {
-              pushPromise
-                .then(() => console.log("[Login] router.push() promise resolved"))
-                .catch((err) => {
-                  console.error("[Login] router.push() promise rejected:", err);
-                  console.log("[Login] Fallback: using window.location.href");
-                  window.location.href = "/dashboard";
-                });
+          // Add verification in case navigation doesn't happen
+          let navigationCheckCount = 0;
+          const navigationCheckInterval = setInterval(() => {
+            navigationCheckCount++;
+            console.log(`[Login] Navigation check ${navigationCheckCount}:`, window.location.pathname);
+            if (navigationCheckCount > 5) {
+              clearInterval(navigationCheckInterval);
+              console.warn("[Login] Navigation appears stuck, using window.location.href fallback");
+              window.location.href = "/dashboard";
             }
-            console.log("[Login] router.push() called - navigating now");
-          } catch (err) {
-            console.error("[Login] Error calling router.push():", err);
-            console.log("[Login] Fallback: using window.location.href");
-            window.location.href = "/dashboard";
-          }
-        }, 100);
+          }, 200);
+
+          // Clear interval after 2 seconds (assumes navigation happened)
+          setTimeout(() => {
+            clearInterval(navigationCheckInterval);
+            console.log("[Login] Navigation verification complete, URL is now:", window.location.href);
+          }, 2000);
+        } catch (err) {
+          console.error("[Login] ✗ Exception calling router.push():", {
+            message: err instanceof Error ? err.message : String(err),
+            stack: err instanceof Error ? err.stack : undefined,
+            error: err,
+          });
+          console.log("[Login] Using fallback: window.location.href");
+          window.location.href = "/dashboard";
+        }
       } else {
         const msg = `Sign-in incomplete (${output.nextStep?.signInStep ?? "unknown step"}). Check your email for a confirmation code.`;
         console.log("[Login] Sign-in incomplete:", msg);

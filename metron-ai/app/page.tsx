@@ -78,21 +78,23 @@ export default function LoginPage() {
         setLoading(false);
         console.log("[Login] Tokens confirmed, attempting navigation to /dashboard...");
 
-        // Use window.location.href directly since router.push() appears to be non-functional
-        console.log("[Login] Using window.location.href = '/dashboard'");
-        window.location.href = "/dashboard";
+        // Try router.push first (Next.js aware)
+        try {
+          console.log("[Login] Attempting router.push('/dashboard')...");
+          router.push("/dashboard");
 
-        // Backup: if window.location.href doesn't work, try router.push after delay
-        setTimeout(() => {
-          if (window.location.pathname === "/") {
-            console.warn("[Login] window.location.href navigation failed, trying router.push as backup...");
-            try {
-              router.push("/dashboard");
-            } catch (err) {
-              console.error("[Login] router.push backup also failed:", err);
+          // If router.push doesn't work, fallback to window.location.href after short delay
+          setTimeout(() => {
+            if (window.location.pathname === "/") {
+              console.warn("[Login] router.push didn't navigate, trying window.location.href...");
+              window.location.href = "/dashboard";
             }
-          }
-        }, 500);
+          }, 300);
+        } catch (err) {
+          console.error("[Login] router.push threw error:", err);
+          // If router.push throws, immediately try window.location.href
+          window.location.href = "/dashboard";
+        }
       } else {
         const msg = `Sign-in incomplete (${output.nextStep?.signInStep ?? "unknown step"}). Check your email for a confirmation code.`;
         console.log("[Login] Sign-in incomplete:", msg);

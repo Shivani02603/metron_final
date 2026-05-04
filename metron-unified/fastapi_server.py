@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from core.auth import authenticate_user, create_token, get_cookie_params, get_current_user, COOKIE_NAME, _SECURE_COOKIE
+from core.auth import get_current_user
 from core.config import CORS_ORIGINS, LLM_PROVIDERS
 from core.llm_client import LLMClient
 from core.models import (
@@ -623,35 +623,13 @@ async def compare_runs(run_id_a: str, run_id_b: str, request: Request):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Auth endpoints
+# Auth endpoints — login/logout handled by AWS Cognito on the frontend.
+# /api/auth/me validates the Cognito Bearer token and returns the caller's email.
 # ──────────────────────────────────────────────────────────────────────────
-class _LoginRequest(BaseModel):
-    email: str
-    password: str
-
-
-@app.post("/api/auth/login")
-async def auth_login(body: _LoginRequest):
-    user = authenticate_user(body.email, body.password)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    token = create_token(user["email"])
-    resp = JSONResponse({"ok": True, "email": user["email"]})
-    resp.set_cookie(value=token, **get_cookie_params())
-    return resp
-
 
 @app.post("/api/auth/logout")
 async def auth_logout():
-    resp = JSONResponse({"ok": True})
-    resp.delete_cookie(
-        key=COOKIE_NAME,
-        path="/",
-        httponly=True,
-        samesite="lax",
-        secure=_SECURE_COOKIE,
-    )
-    return resp
+    return JSONResponse({"ok": True})
 
 
 @app.get("/api/auth/me")

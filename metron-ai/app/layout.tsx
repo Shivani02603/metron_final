@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Manrope, Inter } from "next/font/google";
+import AmplifyProvider from "@/components/AmplifyProvider";
 import "./globals.css";
 
 const inter = Inter({
@@ -34,7 +35,7 @@ export default function RootLayout({
         />
       </head>
       <body className="bg-background text-on-surface antialiased font-body min-h-screen">
-        {children}
+        <AmplifyProvider>{children}</AmplifyProvider>
       </body>
     </html>
   );

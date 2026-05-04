@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { authFetch } from "@/lib/api";
 
 interface TestModule {
   id: string;
@@ -21,6 +22,19 @@ interface ProjectConfig {
   documentText: string;
   documentName: string;
 }
+
+const MOD_BORDER_L: Record<string, string> = {
+  "#00668a": "[border-left-color:#00668a]",
+  "#ba1a1a": "[border-left-color:#ba1a1a]",
+  "#38bdf8": "[border-left-color:#38bdf8]",
+  "#006e2f": "[border-left-color:#006e2f]",
+};
+const MOD_TEXT: Record<string, string> = {
+  "#00668a": "text-[#00668a]",
+  "#ba1a1a": "text-[#ba1a1a]",
+  "#38bdf8": "text-[#38bdf8]",
+  "#006e2f": "text-[#006e2f]",
+};
 
 export default function NodeBuilder() {
   const params = useParams();
@@ -96,7 +110,7 @@ export default function NodeBuilder() {
       const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout for backend response
 
       try {
-        const res = await fetch("/api/run", {
+        const res = await authFetch("/api/run", {
           method: "POST",
           body: formData,
           signal: controller.signal,
@@ -144,6 +158,7 @@ export default function NodeBuilder() {
           {error && <span className="text-[9px] text-red-500 font-bold max-w-[200px] truncate">{error}</span>}
           <div className="px-3 py-1.5 rounded-full bg-primary/5 text-[9px] font-black text-primary border border-primary/10 uppercase tracking-[.2em]">Blueprint Active</div>
           <button
+            type="button"
             onClick={launchRun}
             disabled={isLaunching || activeModules.length === 0}
             className="px-6 py-2.5 rounded-xl btn-primary text-[10px] font-black uppercase tracking-widest shadow-xl shadow-primary/10 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
@@ -186,7 +201,7 @@ export default function NodeBuilder() {
                 {mod.enabled && <div className="absolute top-0 right-0 w-12 h-12 bg-primary/5 rounded-full -mr-6 -mt-6 blur-xl" />}
                 <div className="flex items-center justify-between mb-3 relative z-10">
                   <div className="w-10 h-10 rounded-2xl flex items-center justify-center bg-white border border-outline-variant/10 shadow-sm group-hover:scale-110 transition-transform">
-                    <span className="material-symbols-outlined text-xl" style={{ color: mod.enabled ? mod.color : "var(--color-outline)" }}>{mod.icon}</span>
+                    <span className={`material-symbols-outlined text-xl ${mod.enabled ? MOD_TEXT[mod.color] || "" : "text-[var(--color-outline)]"}`}>{mod.icon}</span>
                   </div>
                   <div className={`w-8 h-4 rounded-full relative transition-colors duration-300 ${mod.enabled ? "bg-primary" : "bg-outline-variant/30"}`}>
                     <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow-sm transition-all duration-300 ${mod.enabled ? "left-[18px]" : "left-0.5"}`} />
@@ -204,6 +219,7 @@ export default function NodeBuilder() {
           {/* Advanced Config */}
           <div className="border-t border-outline-variant/10 pt-4">
             <button
+              type="button"
               onClick={() => setShowAdvanced(!showAdvanced)}
               className="flex items-center gap-2 text-[9px] font-black uppercase tracking-widest text-outline opacity-60 hover:opacity-100 hover:text-primary transition-all w-full"
             >
@@ -243,6 +259,8 @@ export default function NodeBuilder() {
                         max={500}
                         value={loadUsers}
                         onChange={(e) => setLoadUsers(parseInt(e.target.value) || 50)}
+                        title="Concurrent users"
+                        aria-label="Concurrent users"
                         className="w-full px-3 py-2 rounded-xl bg-surface-container-low ring-1 ring-outline-variant/30 focus:ring-primary outline-none text-xs font-bold text-on-surface"
                       />
                     </div>
@@ -254,6 +272,8 @@ export default function NodeBuilder() {
                         max={600}
                         value={loadDuration}
                         onChange={(e) => setLoadDuration(parseInt(e.target.value) || 60)}
+                        title="Duration in seconds"
+                        aria-label="Duration in seconds"
                         className="w-full px-3 py-2 rounded-xl bg-surface-container-low ring-1 ring-outline-variant/30 focus:ring-primary outline-none text-xs font-bold text-on-surface"
                       />
                     </div>
@@ -309,8 +329,8 @@ export default function NodeBuilder() {
                     {activeModules.map((mod) => (
                       <div key={mod.id} className="flex items-center relative group">
                         <div className="w-8 h-[2px] bg-primary/20 group-hover:bg-primary transition-colors" />
-                        <div className="px-5 py-3.5 rounded-2xl bg-white border border-outline-variant/20 shadow-md flex items-center gap-3 hover:shadow-xl hover:-translate-y-0.5 transition-all w-56 border-l-4" style={{ borderColor: mod.color }}>
-                          <div className="w-9 h-9 rounded-xl flex items-center justify-center bg-gray-50/50 shadow-inner" style={{ color: mod.color }}>
+                        <div className={`px-5 py-3.5 rounded-2xl bg-white border border-outline-variant/20 shadow-md flex items-center gap-3 hover:shadow-xl hover:-translate-y-0.5 transition-all w-56 border-l-4 ${MOD_BORDER_L[mod.color] || ""}`}>
+                          <div className={`w-9 h-9 rounded-xl flex items-center justify-center bg-gray-50/50 shadow-inner ${MOD_TEXT[mod.color] || ""}`}>
                             <span className="material-symbols-outlined text-xl">{mod.icon}</span>
                           </div>
                           <div className="flex-1 overflow-hidden">

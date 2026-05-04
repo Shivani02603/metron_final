@@ -1,6 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { signIn, signOut, fetchAuthSession } from "aws-amplify/auth";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -8,27 +10,106 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const router = useRouter();
+
+  useEffect(() => {
+    const handleError = (event: ErrorEvent) => {
+      console.error("[LoginPage] Global error:", event.error);
+    };
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      console.error("[LoginPage] Unhandled rejection:", event.reason);
+    };
+
+    window.addEventListener("error", handleError);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+
+    return () => {
+      window.removeEventListener("error", handleError);
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+    };
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError("");
     try {
-      const res = await fetch("/api/auth/login", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data.detail || "Invalid email or password");
-        setLoading(false);
-        return;
+      console.log("[Login] Starting sign-in for email:", email.trim());
+
+      // Clear any stale Amplify session before attempting fresh sign-in
+      try {
+        console.log("[Login] Clearing stale session...");
+        await signOut();
+        console.log("[Login] Stale session cleared");
+      } catch (err) {
+        console.log("[Login] No stale session to clear:", err);
       }
-      window.location.href = "/dashboard";
-    } catch {
-      setError("Could not reach the server. Please try again.");
+
+      console.log("[Login] Calling signIn...");
+      const output = await signIn({ username: email.trim(), password });
+      console.log("[Login] SignIn output:", {
+        isSignedIn: output.isSignedIn,
+        nextStep: output.nextStep,
+        fullOutput: JSON.stringify(output),
+      });
+
+      if (output.isSignedIn) {
+        console.log("[Login] Sign-in successful, checking localStorage for tokens...");
+        const storageKeys = Object.keys(localStorage);
+        console.log("[Login] localStorage keys:", storageKeys);
+        const amplifyKeys = storageKeys.filter(k => k.includes('amplify') || k.includes('cognito'));
+        console.log("[Login] Amplify-related storage:", amplifyKeys, {
+          values: amplifyKeys.map(k => ({ key: k, value: localStorage.getItem(k)?.substring(0, 50) }))
+        });
+
+        // Verify session is accessible
+        try {
+          const session = await fetchAuthSession();
+          console.log("[Login] Session check after signIn:", {
+            hasTokens: !!session.tokens,
+            hasIdToken: !!session.tokens?.idToken,
+            email: session.tokens?.idToken?.payload?.email
+          });
+        } catch (e) {
+          console.error("[Login] Failed to fetch session after signIn:", e);
+        }
+
+        console.log("[Login] About to call router.push('/dashboard')...");
+        setLoading(false);
+
+        // Try with a slight delay to ensure tokens are persisted
+        setTimeout(() => {
+          try {
+            console.log("[Login] Delayed router.push('/dashboard')...");
+            const pushPromise = router.push("/dashboard");
+            console.log("[Login] router.push() returned:", pushPromise);
+
+            if (pushPromise instanceof Promise) {
+              pushPromise
+                .then(() => console.log("[Login] router.push() promise resolved"))
+                .catch((err) => {
+                  console.error("[Login] router.push() promise rejected:", err);
+                  console.log("[Login] Fallback: using window.location.href");
+                  window.location.href = "/dashboard";
+                });
+            }
+            console.log("[Login] router.push() called - navigating now");
+          } catch (err) {
+            console.error("[Login] Error calling router.push():", err);
+            console.log("[Login] Fallback: using window.location.href");
+            window.location.href = "/dashboard";
+          }
+        }, 100);
+      } else {
+        const msg = `Sign-in incomplete (${output.nextStep?.signInStep ?? "unknown step"}). Check your email for a confirmation code.`;
+        console.log("[Login] Sign-in incomplete:", msg);
+        setError(msg);
+        setLoading(false);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Invalid email or password";
+      console.error("[Login] Error during sign-in:", { msg, fullError: err });
+      setError(msg);
       setLoading(false);
     }
   };
@@ -167,7 +248,7 @@ export default function LoginPage() {
             <div className="h-px flex-1 bg-[var(--color-outline-variant)] opacity-30" />
           </div>
 
-          <button className="w-full py-4 rounded-xl border border-[var(--color-outline-variant)] border-opacity-40 flex items-center justify-center gap-3 text-sm font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-low)] transition-all">
+          <button type="button" className="w-full py-4 rounded-xl border border-[var(--color-outline-variant)] border-opacity-40 flex items-center justify-center gap-3 text-sm font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-low)] transition-all">
             <svg className="w-5 h-5" viewBox="0 0 24 24">
               <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
               <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
@@ -179,7 +260,10 @@ export default function LoginPage() {
 
           <footer className="pt-8 text-center">
             <p className="text-xs text-[var(--color-on-surface-variant)] font-medium">
-              Don&apos;t have access? <span className="text-[var(--color-on-surface)] font-bold">Ask your Admin.</span>
+              Don&apos;t have an account?{" "}
+              <a href="/register" className="text-[var(--color-primary)] font-bold hover:underline">
+                Create one
+              </a>
             </p>
           </footer>
         </div>

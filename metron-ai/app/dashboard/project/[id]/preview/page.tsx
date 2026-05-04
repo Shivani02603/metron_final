@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { authFetch } from "@/lib/api";
 
 const API = "";
 
@@ -138,7 +139,7 @@ export default function PreviewPage() {
       const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout for backend response
 
       try {
-        const res = await fetch(`${API}/api/run`, { method: "POST", body: formData, signal: controller.signal });
+        const res = await authFetch(`${API}/api/run`, { method: "POST", body: formData, signal: controller.signal });
         clearTimeout(timeoutId);
         if (!res.ok) {
           const err = await res.json().catch(() => ({ detail: res.statusText }));

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useParams } from "next/navigation";
+import { authFetch } from "@/lib/api";
 
 // ── Types matching the backend report structure ───────────────────────────────
 
@@ -124,14 +125,14 @@ export default function AnalysisPage() {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${BACKEND}/api/job/${runId}/status`);
+      const res = await authFetch(`${BACKEND}/api/job/${runId}/status`);
       if (!res.ok) return;
       const data: JobStatus = await res.json();
       setJobStatus(data);
 
       if (data.status === "completed") {
         setPolling(false);
-        const rRes = await fetch(`${BACKEND}/api/job/${runId}/results`);
+        const rRes = await authFetch(`${BACKEND}/api/job/${runId}/results`);
         if (rRes.ok) setReport(await rRes.json());
       } else if (data.status === "failed") {
         setPolling(false);
@@ -149,8 +150,8 @@ export default function AnalysisPage() {
   }, [runId, polling, fetchStatus]);
 
   const healthPct = report ? Math.round(report.health_score * 100) : 0;
-  const healthColor =
-    healthPct >= 70 ? "#006e2f" : healthPct >= 40 ? "#b45309" : "#ba1a1a";
+  const healthClass =
+    healthPct >= 70 ? "text-[#006e2f]" : healthPct >= 40 ? "text-[#b45309]" : "text-[#ba1a1a]";
 
   // ── Processing View ─────────────────────────────────────────────────────────
   if (!report) {
@@ -172,7 +173,7 @@ export default function AnalysisPage() {
           <>
             <div className="w-[280px] h-[280px] rounded-full border-2 border-primary/10 flex items-center justify-center relative">
               <div className="absolute inset-0 border-t-4 border-primary rounded-full animate-spin" />
-              <div className="absolute inset-4 border-t-2 border-primary/30 rounded-full animate-spin" style={{ animationDirection: "reverse", animationDuration: "3s" }} />
+              <div className="absolute inset-4 border-t-2 border-primary/30 rounded-full animate-spin [animation-direction:reverse] [animation-duration:3s]" />
               <div className="text-center z-10">
                 <p className="text-6xl font-black font-headline text-on-surface">{progress}%</p>
                 <p className="text-[10px] font-black uppercase tracking-[.3em] text-primary mt-1">Running</p>
@@ -221,7 +222,7 @@ export default function AnalysisPage() {
         </div>
         <div className="flex items-center gap-4 shrink-0">
           <div className="text-right">
-            <p className="text-2xl font-black font-headline" style={{ color: healthColor }}>
+            <p className={`text-2xl font-black font-headline ${healthClass}`}>
               {healthPct}
               <span className="text-[11px] font-bold text-outline opacity-50">/100</span>
             </p>
@@ -255,7 +256,7 @@ export default function AnalysisPage() {
                       <span className="material-symbols-outlined text-lg text-outline/50">{c.icon}</span>
                       <p className="text-[9px] font-black uppercase tracking-widest text-outline opacity-60">{c.label}</p>
                     </div>
-                    <p className="text-3xl font-black font-headline" style={c.color ? { color: c.color } : {}}>
+                    <p className={`text-3xl font-black font-headline ${{ "#006e2f": "text-[#006e2f]", "#ba1a1a": "text-[#ba1a1a]" }[c.color ?? ""] ?? ""}`}>
                       {c.value}
                     </p>
                   </div>
@@ -276,18 +277,15 @@ export default function AnalysisPage() {
                         </div>
                         <div className="flex items-center gap-4 text-[10px] font-bold text-outline">
                           <span>{summary.passed}/{summary.total} passed</span>
-                          <span className="font-black" style={{ color: passRate >= 0.7 ? "#006e2f" : passRate >= 0.4 ? "#b45309" : "#ba1a1a" }}>
+                          <span className={`font-black ${passRate >= 0.7 ? "text-[#006e2f]" : passRate >= 0.4 ? "text-[#b45309]" : "text-[#ba1a1a]"}`}>
                             {pct(passRate)}
                           </span>
                         </div>
                       </div>
                       <div className="h-2 rounded-full bg-outline-variant/20 overflow-hidden">
                         <div
-                          className="h-full rounded-full transition-all duration-700"
-                          style={{
-                            width: pct(passRate),
-                            backgroundColor: passRate >= 0.7 ? "#006e2f" : passRate >= 0.4 ? "#b45309" : "#ba1a1a",
-                          }}
+                          className={`h-full rounded-full transition-all duration-700 ${passRate >= 0.7 ? "bg-[#006e2f]" : passRate >= 0.4 ? "bg-[#b45309]" : "bg-[#ba1a1a]"}`}
+                          style={{ width: pct(passRate) }}
                         />
                       </div>
                     </div>
@@ -458,11 +456,8 @@ export default function AnalysisPage() {
                     </div>
                     <div className="h-1.5 rounded-full bg-outline-variant/20 overflow-hidden">
                       <div
-                        className="h-full rounded-full"
-                        style={{
-                          width: pct(p.avg_score),
-                          backgroundColor: p.avg_score >= 0.7 ? "#006e2f" : p.avg_score >= 0.4 ? "#b45309" : "#ba1a1a",
-                        }}
+                        className={`h-full rounded-full ${p.avg_score >= 0.7 ? "bg-[#006e2f]" : p.avg_score >= 0.4 ? "bg-[#b45309]" : "bg-[#ba1a1a]"}`}
+                        style={{ width: pct(p.avg_score) }}
                       />
                     </div>
                     <div className="flex justify-between text-[9px] text-outline opacity-50 font-bold">

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { authFetch } from "@/lib/api";
 
 interface Project {
   id: string;
@@ -31,7 +32,7 @@ export default function ProjectHub() {
 
   // Load persisted projects from API on mount
   useEffect(() => {
-    fetch("/api/projects", { credentials: "include" })
+    authFetch("/api/projects")
       .then((r) => r.json())
       .then((data) => {
         if (!data.projects) return;
@@ -80,9 +81,8 @@ export default function ProjectHub() {
 
       // Persist to server so it survives logout/login
       try {
-        await fetch("/api/projects", {
+        await authFetch("/api/projects", {
           method: "POST",
-          credentials: "include",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             project_id: tempId,
@@ -138,9 +138,8 @@ export default function ProjectHub() {
   const handleDeleteProject = async (projectId: string) => {
     setIsDeleting(true);
     try {
-      await fetch(`/api/projects/${projectId}`, {
+      await authFetch(`/api/projects/${projectId}`, {
         method: "DELETE",
-        credentials: "include",
       });
       setProjects((prev) => prev.filter((p) => p.id !== projectId));
       sessionStorage.removeItem(`project_${projectId}`);

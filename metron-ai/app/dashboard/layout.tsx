@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, useEffect } from "react";
+import { fetchAuthSession, signOut } from "aws-amplify/auth";
 
 export default function DashboardLayout({
   children,
@@ -15,20 +16,71 @@ export default function DashboardLayout({
   const [userEmail, setUserEmail] = useState("");
 
   useEffect(() => {
-    fetch("/api/auth/me", { credentials: "include" })
-      .then((r) => {
-        if (r.status === 401) {
-          router.replace("/");
-          return null;
+    console.log("[DashboardLayout] Component mounted, fetching auth session...");
+    let isMounted = true;
+
+    fetchAuthSession()
+      .then((session) => {
+        if (!isMounted) return;
+        console.log("[DashboardLayout] First fetchAuthSession result:", {
+          hasTokens: !!session.tokens,
+          tokenKeys: session.tokens ? Object.keys(session.tokens) : [],
+          hasIdToken: !!session.tokens?.idToken,
+          hasAccessToken: !!session.tokens?.accessToken,
+          idTokenPayload: session.tokens?.idToken?.payload,
+          credentialsSource: (session as any)?.credentials?.source,
+        });
+
+        if (session.tokens) {
+          const email = (session.tokens.idToken?.payload?.email as string) ?? "";
+          console.log("[DashboardLayout] Got email from token on first try:", email);
+          setUserEmail(email);
+          return;
         }
-        return r.json();
+
+        // tokens absent — one retry after a tick (handles Amplify init race)
+        console.log("[DashboardLayout] No tokens on first attempt, waiting 300ms and retrying...");
+        return new Promise<void>((resolve) => setTimeout(resolve, 300))
+          .then(() => {
+            if (!isMounted) return;
+            console.log("[DashboardLayout] Retrying fetchAuthSession...");
+            return fetchAuthSession();
+          })
+          .then((s) => {
+            if (!isMounted) return;
+            console.log("[DashboardLayout] Second fetchAuthSession result:", {
+              hasTokens: !!s.tokens,
+              tokenKeys: s.tokens ? Object.keys(s.tokens) : [],
+              hasIdToken: !!s.tokens?.idToken,
+            });
+
+            if (s.tokens) {
+              const email = (s.tokens.idToken?.payload?.email as string) ?? "";
+              console.log("[DashboardLayout] Got email from token on retry:", email);
+              setUserEmail(email);
+            } else {
+              console.warn("[DashboardLayout] Still no tokens after retry, but allowing dashboard to load");
+            }
+          });
       })
-      .then((data) => { if (data) setUserEmail(data.email ?? ""); })
-      .catch(() => router.replace("/"));
+      .catch((err) => {
+        if (!isMounted) return;
+        console.error("[DashboardLayout] Error fetching auth session:", {
+          message: err?.message,
+          code: (err as any)?.code,
+          name: err?.name,
+          fullError: err
+        });
+        console.warn("[DashboardLayout] Auth session fetch failed, but allowing dashboard to load (API calls will handle auth)");
+      });
+
+    return () => {
+      isMounted = false;
+    };
   }, [router]);
 
   const handleLogout = async () => {
-    await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+    await signOut();
     window.location.href = "/";
   };
 
@@ -48,6 +100,7 @@ export default function DashboardLayout({
       >
         {/* Toggle Button (The Closing Arrow) */}
         <button 
+          type="button"
           onClick={() => setIsCollapsed(!isCollapsed)}
           className="absolute -right-3 top-20 w-6 h-6 rounded-full bg-white border border-outline-variant/30 flex items-center justify-center text-primary shadow-sm hover:shadow-md transition-all z-[110]"
         >
@@ -107,7 +160,7 @@ export default function DashboardLayout({
               </div>
             )}
             {!isCollapsed && (
-              <button onClick={handleLogout} className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--color-outline)] hover:text-red-500 hover:bg-red-50 transition-all">
+              <button type="button" onClick={handleLogout} className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--color-outline)] hover:text-red-500 hover:bg-red-50 transition-all">
                 <span className="material-symbols-outlined text-xl">logout</span>
               </button>
             )}

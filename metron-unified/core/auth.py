@@ -1,88 +1,76 @@
 """
-Simple file-based auth. Users are defined in users.json at the project root.
-Passwords are hashed in memory on startup — never stored as hashes on disk.
-JWT stored in an httpOnly cookie for persistent login.
+Cognito JWT auth. Verifies RS256 Bearer tokens issued by AWS Cognito User Pools.
+JWKS keys are cached for 1 hour to avoid repeated network fetches.
 """
-
 from __future__ import annotations
 import json
 import os
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+import time
+import urllib.request
 from typing import Optional
 
-import bcrypt as _bcrypt
-from jose import JWTError, jwt
+from jose import jwt, jwk
 from fastapi import HTTPException, Request
 
-SECRET_KEY = os.environ.get("SESSION_SECRET", "metron-change-this-secret-before-production")
-ALGORITHM  = "HS256"
-COOKIE_NAME = "metron_session"
-_EXPIRE_DAYS = 7
-_SECURE_COOKIE = os.environ.get("METRON_SECURE_COOKIE", "false").lower() == "true"
+_REGION    = lambda: os.environ.get("COGNITO_REGION", "us-east-1")
+_POOL_ID   = lambda: os.environ.get("COGNITO_USER_POOL_ID", "")
+_CLIENT_ID = lambda: os.environ.get("COGNITO_CLIENT_ID", "")
 
-# email (lowercase) → {name, password_hash}
-_USERS: dict[str, dict] = {}
+_jwks_cache: dict = {"keys": {}, "expires": 0.0}
 
-def _load_users() -> None:
-    path = Path(__file__).parent.parent / "users.json"
-    if not path.exists():
-        print(f"[Auth] users.json not found at {path}. No users loaded.")
-        return
+
+def _fetch_jwks() -> dict:
+    now = time.monotonic()
+    if _jwks_cache["expires"] > now and _jwks_cache["keys"]:
+        return _jwks_cache["keys"]
+    pool_id = _POOL_ID()
+    if not pool_id:
+        raise RuntimeError("COGNITO_USER_POOL_ID env var not set")
+    url = (
+        f"https://cognito-idp.{_REGION()}.amazonaws.com"
+        f"/{pool_id}/.well-known/jwks.json"
+    )
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        data = json.loads(resp.read())
+    keys = {k["kid"]: k for k in data["keys"]}
+    _jwks_cache.update({"keys": keys, "expires": now + 3600})
+    return keys
+
+
+def verify_cognito_token(token: str) -> Optional[dict]:
     try:
-        entries = json.loads(path.read_text(encoding="utf-8"))
-        for u in entries:
-            email = u.get("email", "").lower().strip()
-            password = u.get("password", "")
-            if email and password:
-                _USERS[email] = {
-                    "password_hash": _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()),
-                }
-        print(f"[Auth] Loaded {len(_USERS)} user(s) from users.json")
+        headers = jwt.get_unverified_headers(token)
+        kid = headers.get("kid")
+        keys = _fetch_jwks()
+        if kid not in keys:
+            _jwks_cache["expires"] = 0.0  # force refresh once
+            keys = _fetch_jwks()
+        if kid not in keys:
+            return None
+        public_key = jwk.construct(keys[kid])
+        issuer = (
+            f"https://cognito-idp.{_REGION()}.amazonaws.com/{_POOL_ID()}"
+        )
+        claims = jwt.decode(
+            token,
+            public_key,
+            algorithms=["RS256"],
+            audience=_CLIENT_ID(),
+            issuer=issuer,
+        )
+        email = claims.get("email") or claims.get("cognito:username", "")
+        return {"email": email}
     except Exception as exc:
-        print(f"[Auth] Failed to load users.json: {exc}")
-
-_load_users()
-
-
-def authenticate_user(email: str, password: str) -> Optional[dict]:
-    user = _USERS.get(email.lower().strip())
-    if not user:
+        print(f"[Auth] Token verification failed: {exc}")
         return None
-    if not _bcrypt.checkpw(password.encode(), user["password_hash"]):
-        return None
-    return {"email": email.lower().strip()}
-
-
-def create_token(email: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(days=_EXPIRE_DAYS)
-    return jwt.encode({"sub": email, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
-
-
-def verify_token(token: str) -> Optional[dict]:
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return {"email": payload["sub"]}
-    except JWTError:
-        return None
-
-
-def get_cookie_params() -> dict:
-    return {
-        "key":      COOKIE_NAME,
-        "httponly": True,
-        "samesite": "lax",
-        "secure":   _SECURE_COOKIE,
-        "max_age":  _EXPIRE_DAYS * 24 * 3600,
-        "path":     "/",
-    }
 
 
 def get_current_user(request: Request) -> dict:
-    token = request.cookies.get(COOKIE_NAME)
-    if not token:
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated")
-    user = verify_token(token)
+    token = auth_header[7:]
+    user = verify_cognito_token(token)
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid or expired session")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user

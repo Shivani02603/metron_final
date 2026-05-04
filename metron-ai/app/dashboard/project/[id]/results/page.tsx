@@ -2,6 +2,7 @@
 
 import { useState, useEffect, Suspense } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { authFetch } from "@/lib/api";
 
 const API = "";
 
@@ -187,7 +188,7 @@ function ResultsContent() {
       return;
     }
 
-    fetch(`${API}/api/job/${runId}/results`, { credentials: "include" })
+    authFetch(`${API}/api/job/${runId}/results`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();

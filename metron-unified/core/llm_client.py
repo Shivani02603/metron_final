@@ -74,9 +74,10 @@ class LLMClient:
     # How long (seconds) before a rate-exhausted model is retried.
     _EXHAUSTION_COOLDOWN_S: float = 300.0   # 5 minutes
 
-    def __init__(self, provider_name: str = "Groq", api_key: str = ""):
+    def __init__(self, provider_name: str = "Groq", api_key: str = "", azure_endpoint: str = ""):
         self.provider_name = provider_name
         self.api_key = resolve_api_key(provider_name, api_key)
+        self.azure_endpoint = azure_endpoint.strip()
         if provider_name not in LLM_PROVIDERS:
             print(f"[LLMClient] WARNING: Unknown provider '{provider_name}', falling back to Groq. "
                   f"Known providers: {list(LLM_PROVIDERS.keys())}")
@@ -107,7 +108,13 @@ class LLMClient:
         # Build cross-provider fallback chain: static FALLBACK_CHAIN first,
         # then one balanced model from each other configured provider whose
         # API key is available in the environment.
-        static_fallbacks = [m for m in FALLBACK_CHAIN if m != primary_model]
+        # Only include a fallback model if its provider actually has a usable key —
+        # avoids cascading "Invalid API Key" errors when the user picked a specific
+        # provider and no other keys are set in the environment.
+        static_fallbacks = [
+            m for m in FALLBACK_CHAIN
+            if m != primary_model and self._has_key_for_model(m)
+        ]
         cross_provider = []
         for pname, pinfo in LLM_PROVIDERS.items():
             if pname == self.provider_name:
@@ -187,6 +194,18 @@ class LLMClient:
 
     # ── Internal helpers ───────────────────────────────────────────────────
 
+    def _has_key_for_model(self, model: str) -> bool:
+        """Return True only if we have an API key to call this model."""
+        prefix = model.split("/")[0] if "/" in model else ""
+        primary_prefix = LLM_PROVIDERS.get(self.provider_name, {}).get("prefix", "")
+        if prefix == primary_prefix:
+            return bool(self.api_key)
+        for pinfo in LLM_PROVIDERS.values():
+            if pinfo.get("prefix") == prefix:
+                env_key = pinfo.get("env_key", "")
+                return bool(env_key and os.environ.get(env_key))
+        return False
+
     async def _call(
         self, model: str, prompt: str, system: str,
         temperature: float, max_tokens: int,
@@ -210,8 +229,9 @@ class LLMClient:
             kwargs["api_base"] = "https://integrate.api.nvidia.com/v1"
         elif prefix == "azure":
             kwargs["api_key"] = self.api_key or os.environ.get("AZURE_OPENAI_API_KEY", "")
-            # Strip everything after the hostname — litellm needs only the base URL
-            raw_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+            # Use user-supplied endpoint first, then fall back to env var.
+            # Strip path components — litellm needs only the base hostname URL.
+            raw_endpoint = self.azure_endpoint or os.environ.get("AZURE_OPENAI_ENDPOINT", "")
             if raw_endpoint:
                 from urllib.parse import urlparse
                 parsed = urlparse(raw_endpoint)

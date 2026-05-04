@@ -135,6 +135,21 @@ def _build_locust_file(config: RunConfig, path: str) -> str:
     return host
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Convert value to float, returning default for None/empty/non-numeric strings like 'N/A'."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _parse_locust_csv(csv_prefix: str) -> Dict[str, Any]:
     """
     Parse Locust's *_stats.csv output file and extract the Aggregated row.
@@ -148,12 +163,12 @@ def _parse_locust_csv(csv_prefix: str) -> Dict[str, Any]:
         reader = csv.DictReader(f)
         for row in reader:
             if row.get("Name", "").strip().lower() == "aggregated":
-                total     = int(row.get("Request Count", 0) or 0)
-                failures  = int(row.get("Failure Count", 0) or 0)
-                avg_ms    = float(row.get("Average Response Time", 0) or 0)
-                p95_ms    = float(row.get("95%", 0) or 0)
-                p99_ms    = float(row.get("99%", 0) or 0)
-                rps       = float(row.get("Requests/s", 0) or 0)
+                total     = _safe_int(row.get("Request Count"))
+                failures  = _safe_int(row.get("Failure Count"))
+                avg_ms    = _safe_float(row.get("Average Response Time"))
+                p95_ms    = _safe_float(row.get("95%"))
+                p99_ms    = _safe_float(row.get("99%"))
+                rps       = _safe_float(row.get("Requests/s"))
                 error_rate = round(failures / total * 100, 2) if total > 0 else 0.0
 
                 _lat_cap = THRESHOLDS["performance_latency_ms"]

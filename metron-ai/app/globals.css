@@ -34,6 +34,11 @@ h1, h2, h3, h4, h5, h6 {
   font-family: var(--font-headline);
 }
 
+/* Brand panel gradient used on auth pages */
+.brand-panel-gradient {
+  background: linear-gradient(135deg, #001e2c 0%, #004c69 50%, #00668a 100%);
+}
+
 /* MetronAI Custom Primary Button */
 .btn-primary {
   background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-container) 100%);

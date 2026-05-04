@@ -340,6 +340,7 @@ export default function ProjectHub() {
                 <div className="relative group p-8 border-2 border-dashed border-[var(--color-outline-variant)] border-opacity-30 rounded-[2rem] bg-[var(--color-surface-container-low)]/50 hover:bg-primary/5 hover:border-primary/50 transition-all text-center space-y-3 cursor-pointer overflow-hidden">
                   <input
                     type="file"
+                    aria-label="Upload System Document"
                     className="absolute inset-0 opacity-0 cursor-pointer z-20"
                     onChange={handleFileUpload}
                     accept=".txt,.md,.json,.pdf,.docx"

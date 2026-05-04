@@ -62,6 +62,7 @@ export default function ConfigurePage() {
   const [providers, setProviders] = useState<Record<string, Provider>>({});
   const [llmProvider, setLlmProvider] = useState("NVIDIA NIM");
   const [llmApiKey, setLlmApiKey] = useState("");
+  const [azureEndpoint, setAzureEndpoint] = useState("");
 
   // Security
   const [selectedAttacks, setSelectedAttacks] = useState<string[]>(["jailbreak", "prompt_injection", "pii_extraction", "toxicity", "encoding"]);
@@ -185,6 +186,7 @@ export default function ConfigurePage() {
           num_scenarios: numScenarios,
           llm_provider: llmProvider,
           llm_api_key: llmApiKey,
+          azure_endpoint: azureEndpoint,
         }),
       });
       if (!res.ok) {
@@ -259,6 +261,7 @@ export default function ConfigurePage() {
       load_duration_seconds: loadDuration,
       llm_provider: llmProvider,
       llm_api_key: llmApiKey,
+      azure_endpoint: azureEndpoint,
       selected_attacks: selectedAttacks,
       attacks_per_category: attacksPerCategory,
       ragas_metrics: ragasMetrics,
@@ -298,6 +301,7 @@ export default function ConfigurePage() {
             num_scenarios: numScenarios,
             llm_provider: llmProvider,
             llm_api_key: llmApiKey,
+            azure_endpoint: azureEndpoint,
           }),
         });
         if (res.ok) {
@@ -332,8 +336,9 @@ export default function ConfigurePage() {
         fd.append("content", docText);
       }
       if (archDiagramFile) fd.append("image", archDiagramFile, archDiagramFile.name);
-      fd.append("llm_provider", llmProvider);
-      fd.append("llm_api_key",  llmApiKey);
+      fd.append("llm_provider",   llmProvider);
+      fd.append("llm_api_key",    llmApiKey);
+      fd.append("azure_endpoint", azureEndpoint);
 
       const res = await fetch(`${API}/api/parse-architecture`, { method: "POST", body: fd });
       if (!res.ok) throw new Error(await res.text());
@@ -420,7 +425,7 @@ export default function ConfigurePage() {
           </div>
           <div className="space-y-4">
             <Field label="Authentication">
-              <select className="input-field" value={authType} onChange={(e) => setAuthType(e.target.value as "none" | "bearer")}>
+              <select className="input-field" aria-label="Authentication" value={authType} onChange={(e) => setAuthType(e.target.value as "none" | "bearer")}>
                 <option value="none">None</option>
                 <option value="bearer">Bearer Token</option>
               </select>
@@ -487,7 +492,7 @@ export default function ConfigurePage() {
               <input className="input-field" placeholder="Customer Support Bot" value={agentName} onChange={(e) => setAgentName(e.target.value)} />
             </Field>
             <Field label="Domain">
-              <select className="input-field" value={agentDomain} onChange={(e) => setAgentDomain(e.target.value)}>
+              <select className="input-field" aria-label="Domain" value={agentDomain} onChange={(e) => setAgentDomain(e.target.value)}>
                 {DOMAINS.map((d) => <option key={d}>{d}</option>)}
               </select>
             </Field>
@@ -606,6 +611,7 @@ export default function ConfigurePage() {
                 <input
                   type="file"
                   accept=".csv,.json"
+                  aria-label="Upload Ground Truth File"
                   className="absolute inset-0 opacity-0 cursor-pointer z-10"
                   onChange={(e) => setGroundTruthFile(e.target.files?.[0] || null)}
                 />
@@ -666,7 +672,7 @@ export default function ConfigurePage() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
           <div className="space-y-4">
             <Field label="Provider">
-              <select className="input-field" value={llmProvider} onChange={(e) => setLlmProvider(e.target.value)}>
+              <select className="input-field" aria-label="Provider" value={llmProvider} onChange={(e) => setLlmProvider(e.target.value)}>
                 {Object.keys(providers).length > 0
                   ? Object.keys(providers).map((p) => <option key={p}>{p}</option>)
                   : ["NVIDIA NIM", "Groq", "Google Gemini", "Azure OpenAI"].map((p) => <option key={p}>{p}</option>)}
@@ -689,6 +695,17 @@ export default function ConfigurePage() {
                 onChange={(e) => setLlmApiKey(e.target.value)}
               />
             </Field>
+            {llmProvider === "Azure OpenAI" && (
+              <Field label="Azure Endpoint URL">
+                <input
+                  className="input-field"
+                  type="text"
+                  placeholder="https://your-resource.openai.azure.com/"
+                  value={azureEndpoint}
+                  onChange={(e) => setAzureEndpoint(e.target.value)}
+                />
+              </Field>
+            )}
             {providerInfo && (
               <div className="p-3 rounded-xl bg-[var(--color-surface-variant)] space-y-1">
                 <p className="text-xs text-[var(--color-on-surface-variant)] opacity-60">Default model</p>
@@ -851,7 +868,7 @@ export default function ConfigurePage() {
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <Field label="Deployment Type">
-                <select className="input-field" value={deploymentType} onChange={(e) => setDeploymentType(e.target.value)}>
+                <select className="input-field" aria-label="Deployment Type" value={deploymentType} onChange={(e) => setDeploymentType(e.target.value)}>
                   <option value="unknown">Unknown / Not sure</option>
                   <option value="serverless">Serverless (Lambda, Azure Functions, Cloud Run)</option>
                   <option value="server">Server / VM (always-on)</option>
@@ -860,7 +877,7 @@ export default function ConfigurePage() {
               </Field>
 
               <Field label="Vector DB (if RAG)">
-                <select className="input-field" value={vectorDb} onChange={(e) => setVectorDb(e.target.value)}>
+                <select className="input-field" aria-label="Vector DB" value={vectorDb} onChange={(e) => setVectorDb(e.target.value)}>
                   <option value="">None / Not applicable</option>
                   <option value="pinecone">Pinecone</option>
                   <option value="weaviate">Weaviate</option>
@@ -872,7 +889,7 @@ export default function ConfigurePage() {
               </Field>
 
               <Field label="Session / Memory DB">
-                <select className="input-field" value={sessionDb} onChange={(e) => setSessionDb(e.target.value)}>
+                <select className="input-field" aria-label="Session / Memory DB" value={sessionDb} onChange={(e) => setSessionDb(e.target.value)}>
                   <option value="">None / Stateless</option>
                   <option value="redis">Redis</option>
                   <option value="postgresql">PostgreSQL</option>
@@ -884,7 +901,7 @@ export default function ConfigurePage() {
               </Field>
 
               <Field label="Cache Layer">
-                <select className="input-field" value={cacheLayer} onChange={(e) => setCacheLayer(e.target.value)}>
+                <select className="input-field" aria-label="Cache Layer" value={cacheLayer} onChange={(e) => setCacheLayer(e.target.value)}>
                   <option value="">None</option>
                   <option value="redis">Redis</option>
                   <option value="memcached">Memcached</option>
@@ -895,7 +912,7 @@ export default function ConfigurePage() {
               </Field>
 
               <Field label="Message Queue">
-                <select className="input-field" value={messageQueue} onChange={(e) => setMessageQueue(e.target.value)}>
+                <select className="input-field" aria-label="Message Queue" value={messageQueue} onChange={(e) => setMessageQueue(e.target.value)}>
                   <option value="">None</option>
                   <option value="kafka">Kafka</option>
                   <option value="rabbitmq">RabbitMQ</option>
@@ -907,7 +924,7 @@ export default function ConfigurePage() {
               </Field>
 
               <Field label="API Gateway">
-                <select className="input-field" value={apiGateway} onChange={(e) => setApiGateway(e.target.value)}>
+                <select className="input-field" aria-label="API Gateway" value={apiGateway} onChange={(e) => setApiGateway(e.target.value)}>
                   <option value="">None / Direct</option>
                   <option value="aws_apigw">AWS API Gateway</option>
                   <option value="azure_apim">Azure APIM</option>
@@ -918,7 +935,7 @@ export default function ConfigurePage() {
               </Field>
 
               <Field label="Auth Mechanism">
-                <select className="input-field" value={authMechanism} onChange={(e) => setAuthMechanism(e.target.value)}>
+                <select className="input-field" aria-label="Auth Mechanism" value={authMechanism} onChange={(e) => setAuthMechanism(e.target.value)}>
                   <option value="">Unknown</option>
                   <option value="oauth">OAuth 2.0</option>
                   <option value="api_key">API Key</option>
@@ -929,7 +946,7 @@ export default function ConfigurePage() {
               </Field>
 
               <Field label="Monitoring / Observability">
-                <select className="input-field" value={monitoringTool} onChange={(e) => setMonitoringTool(e.target.value)}>
+                <select className="input-field" aria-label="Monitoring / Observability" value={monitoringTool} onChange={(e) => setMonitoringTool(e.target.value)}>
                   <option value="">None / Unknown</option>
                   <option value="datadog">Datadog</option>
                   <option value="cloudwatch">CloudWatch</option>
@@ -992,6 +1009,7 @@ export default function ConfigurePage() {
                   <input
                     type="file"
                     accept=".txt,.pdf,.md"
+                    aria-label="Upload Architecture Document"
                     className="absolute inset-0 opacity-0 cursor-pointer z-10"
                     onChange={(e) => setArchDocFile(e.target.files?.[0] || null)}
                   />
@@ -1019,6 +1037,7 @@ export default function ConfigurePage() {
                   <input
                     type="file"
                     accept="image/png,image/jpeg,image/webp"
+                    aria-label="Upload Architecture Diagram"
                     className="absolute inset-0 opacity-0 cursor-pointer z-10"
                     onChange={(e) => setArchDiagramFile(e.target.files?.[0] || null)}
                   />
@@ -1126,6 +1145,7 @@ function SliderField({ label, min, max, value, onChange }: {
         min={min}
         max={max}
         value={value}
+        aria-label={label}
         onChange={(e) => onChange(parseInt(e.target.value))}
         className="w-full accent-primary"
       />

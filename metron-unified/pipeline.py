@@ -10,9 +10,15 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from core import db as _db
+
 # Per-run locks prevent concurrent pipeline stages from overwriting each other's
 # job_store state when multiple runs execute simultaneously.
 _job_locks: Dict[str, asyncio.Lock] = {}
+
+# Global concurrency cap — initialized lazily inside run_pipeline() so it's
+# created on the correct event loop (avoids DeprecationWarning in Python 3.10+).
+_pipeline_sem: Optional[asyncio.Semaphore] = None
 
 
 def _get_lock(run_id: str) -> asyncio.Lock:
@@ -79,13 +85,30 @@ async def run_pipeline(
     job_store:  Dict[str, Any],
     doc_text:   str = "",
     project_id: str = "",
+    user_email: str = "",
 ) -> None:
     """
     Full 8-stage pipeline. Updates job_store at each stage.
     Called as a background task from FastAPI.
     """
+    global _pipeline_sem
+    if _pipeline_sem is None:
+        _pipeline_sem = asyncio.Semaphore(10)
+
+    # Record ownership immediately — before we acquire the semaphore
+    if run_id in job_store:
+        job_store[run_id]["user_email"] = user_email
+
+    # Write a 'running' placeholder to DB so a server crash is recoverable
+    try:
+        _db.touch_run(run_id, project_id, user_email, config.agent_domain, config.application_type.value)
+    except Exception as _touch_err:
+        print(f"[Pipeline] touch_run failed (non-fatal): {_touch_err}")
+
+    # Acquire the concurrency slot — released in the finally block below
+    await _pipeline_sem.acquire()
     job_store[run_id]["status"] = "running"
-    llm_client = LLMClient(config.llm_provider, config.llm_api_key)
+    llm_client = LLMClient(config.llm_provider, config.llm_api_key, azure_endpoint=config.azure_endpoint)
 
     try:
         # ── Stage 0: App Profile ───────────────────────────────────────────
@@ -259,6 +282,9 @@ async def run_pipeline(
                     return await coro
                 except Exception as exc:
                     print(f"[Pipeline] {label} evaluation failed (non-fatal): {exc}")
+                    job_store[run_id].setdefault("eval_warnings", []).append(
+                        f"{label}: {str(exc)[:300]}"
+                    )
                     return []
 
             async def _all_evals():
@@ -629,9 +655,8 @@ async def run_pipeline(
         job_store[run_id]["results"]  = final_json
         _job_locks.pop(run_id, None)   # release lock for completed run
 
-        # Fix 28: persist completed run to SQLite for history / regression endpoints
+        # Persist completed run to SQLite for history / regression endpoints
         try:
-            from core import db as _db
             _db.save_run(
                 run_id=run_id,
                 project_id=project_id,
@@ -639,6 +664,7 @@ async def run_pipeline(
                 domain=config.agent_domain,
                 application_type=config.application_type.value,
                 results=final_json,
+                user_email=user_email,
             )
         except Exception as db_err:
             print(f"[Pipeline] DB save failed (non-fatal): {db_err}")
@@ -649,4 +675,10 @@ async def run_pipeline(
         job_store[run_id]["error"]  = str(e)
         job_store[run_id]["message"] = f"Pipeline failed: {str(e)[:200]}"
         print(f"[Pipeline ERROR] {run_id}: {traceback.format_exc()}")
-        _job_locks.pop(run_id, None)   # release lock on failure too
+        _job_locks.pop(run_id, None)
+        try:
+            _db.mark_run_failed(run_id, str(e))
+        except Exception as _db_fail_err:
+            print(f"[Pipeline] mark_run_failed failed: {_db_fail_err}")
+    finally:
+        _pipeline_sem.release()

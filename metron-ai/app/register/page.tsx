@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 
 // Role types for display
@@ -10,7 +10,7 @@ const ROLE_LABELS: Record<string, { label: string; color: string; icon: string }
   qa_viewer: { label: "QA Viewer", color: "bg-tertiary/10 text-tertiary", icon: "visibility" },
 };
 
-export default function RegisterPage() {
+function RegisterForm() {
   const searchParams = useSearchParams();
   const token = searchParams.get("token");
   const roleParam = searchParams.get("role") || "qa_viewer";
@@ -78,10 +78,7 @@ export default function RegisterPage() {
     <div className="min-h-screen flex">
       {/* ─── Left Brand Panel (same as Login) ─────────────── */}
       <div
-        className="hidden lg:flex lg:w-1/2 flex-col justify-between p-12 relative overflow-hidden"
-        style={{
-          background: "linear-gradient(135deg, #001e2c 0%, #004c69 50%, #00668a 100%)",
-        }}
+        className="hidden lg:flex lg:w-1/2 flex-col justify-between p-12 relative overflow-hidden brand-panel-gradient"
       >
         <div className="absolute -top-32 -left-32 w-96 h-96 rounded-full bg-white/5 blur-3xl" />
         <div className="absolute bottom-0 right-0 w-[500px] h-[500px] rounded-full bg-[#38bdf8]/10 blur-3xl" />
@@ -195,6 +192,7 @@ export default function RegisterPage() {
                 </span>
                 <input
                   type="email"
+                  aria-label="Work Email"
                   value={emailParam}
                   readOnly
                   className="w-full pl-12 pr-4 py-3.5 rounded-xl bg-surface-container ring-1 ring-outline-variant/20 text-on-surface-variant text-sm cursor-not-allowed"
@@ -309,5 +307,13 @@ export default function RegisterPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function RegisterPage() {
+  return (
+    <Suspense>
+      <RegisterForm />
+    </Suspense>
   );
 }

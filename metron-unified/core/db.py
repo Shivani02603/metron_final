@@ -45,6 +45,7 @@ def init_db() -> None:
                 CREATE TABLE IF NOT EXISTS runs (
                     run_id           TEXT PRIMARY KEY,
                     project_id       TEXT NOT NULL,
+                    user_email       TEXT,
                     timestamp        TEXT NOT NULL,
                     health_score     REAL,
                     domain           TEXT,
@@ -55,6 +56,14 @@ def init_db() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_timestamp ON runs(timestamp)")
+            # Migration: add user_email column to existing databases
+            try:
+                conn.execute("ALTER TABLE runs ADD COLUMN user_email TEXT")
+            except Exception:
+                pass  # column already exists
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_user ON runs(user_email)")
+            # Mark any runs left in 'running' state as failed (crash recovery)
+            conn.execute("UPDATE runs SET status='failed' WHERE status='running'")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS projects (
                     project_id    TEXT PRIMARY KEY,
@@ -81,6 +90,7 @@ def save_run(
     application_type: str,
     results: Dict[str, Any],
     status: str = "completed",
+    user_email: str = "",
 ) -> None:
     """Persist a completed run to SQLite."""
     with _lock:
@@ -89,12 +99,13 @@ def save_run(
             conn.execute(
                 """
                 INSERT OR REPLACE INTO runs
-                    (run_id, project_id, timestamp, health_score, domain, application_type, status, results_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (run_id, project_id, user_email, timestamp, health_score, domain, application_type, status, results_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
                     project_id,
+                    user_email,
                     datetime.utcnow().isoformat(),
                     health_score,
                     domain,
@@ -102,6 +113,44 @@ def save_run(
                     status,
                     json.dumps(results),
                 ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def touch_run(
+    run_id: str,
+    project_id: str,
+    user_email: str,
+    domain: str,
+    application_type: str,
+) -> None:
+    """INSERT OR IGNORE a 'running' placeholder so crashes leave a DB record."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO runs
+                    (run_id, project_id, user_email, timestamp, domain, application_type, status)
+                VALUES (?, ?, ?, ?, ?, ?, 'running')
+                """,
+                (run_id, project_id, user_email, datetime.utcnow().isoformat(), domain, application_type),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def mark_run_failed(run_id: str, error: str) -> None:
+    """Update a run's status to 'failed' and store the error message."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE runs SET status='failed', results_json=? WHERE run_id=?",
+                (json.dumps({"error": error}), run_id),
             )
             conn.commit()
         finally:
@@ -203,8 +252,8 @@ def compare_runs(run_id_a: str, run_id_b: str) -> Dict[str, Any]:
 
 def load_recent_jobs(hours: int = 24) -> List[Dict[str, Any]]:
     """
-    Fetch runs completed within the last N hours for in-memory job store re-population.
-    Used on server startup (Fix 21) so GET /api/job/{id}/results still works after restart.
+    Fetch runs from the last N hours for in-memory job store re-population on startup.
+    Includes completed and failed runs (not 'running' — those were reset to 'failed' in init_db).
     """
     cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
     with _lock:
@@ -212,9 +261,9 @@ def load_recent_jobs(hours: int = 24) -> List[Dict[str, Any]]:
         try:
             rows = conn.execute(
                 """
-                SELECT run_id, status, results_json
+                SELECT run_id, status, results_json, user_email, project_id
                 FROM runs
-                WHERE timestamp >= ? AND status = 'completed'
+                WHERE timestamp >= ? AND status IN ('completed', 'failed')
                 ORDER BY timestamp DESC
                 LIMIT 200
                 """,
@@ -228,6 +277,8 @@ def load_recent_jobs(hours: int = 24) -> List[Dict[str, Any]]:
                         d["results"] = json.loads(d.pop("results_json"))
                     except Exception:
                         d.pop("results_json", None)
+                else:
+                    d.pop("results_json", None)
                 result.append(d)
             return result
         finally:

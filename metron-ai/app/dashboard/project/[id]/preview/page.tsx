@@ -38,7 +38,7 @@ export default function PreviewPage() {
   const [fullConfig, setFullConfig] = useState<Record<string, unknown> | null>(null);
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
-  const [toolStatus, setToolStatus] = useState<Record<string, ToolStatus>>({});
+  const [toolStatus, setToolStatus] = useState<Record<string, ToolStatus> | null>(null);
   const [expandedPersonas, setExpandedPersonas] = useState<Set<string>>(new Set());
   const [expandedScenarios, setExpandedScenarios] = useState<Set<string>>(new Set());
   const [isRunning, setIsRunning] = useState(false);
@@ -57,11 +57,13 @@ export default function PreviewPage() {
       setScenarios(preview.scenarios || []);
     }
 
-    // Fetch tool status
-    fetch(`${API}/api/tools/status`)
+    // Fetch tool status with timeout — slow package imports can block the backend
+    const toolsController = new AbortController();
+    const toolsTimeout = setTimeout(() => toolsController.abort(), 6000);
+    fetch(`${API}/api/tools/status`, { signal: toolsController.signal })
       .then((r) => r.json())
-      .then(setToolStatus)
-      .catch(() => {});
+      .then((data) => { clearTimeout(toolsTimeout); setToolStatus(data); })
+      .catch(() => { clearTimeout(toolsTimeout); setToolStatus({}); });
   }, [projectId]);
 
   const togglePersona = (id: string) => {
@@ -88,6 +90,7 @@ export default function PreviewPage() {
       const cfg = fullConfig as Record<string, unknown>;
       const formData = new FormData();
       formData.append("config", JSON.stringify({
+        project_id: projectId,
         endpoint_url: cfg.endpoint_url,
         request_field: cfg.request_field,
         response_field: cfg.response_field,
@@ -108,6 +111,7 @@ export default function PreviewPage() {
         load_duration_seconds: cfg.load_duration_seconds,
         llm_provider: cfg.llm_provider,
         llm_api_key: cfg.llm_api_key,
+        azure_endpoint: cfg.azure_endpoint || "",
         application_type: cfg.application_type || "chatbot",
         selected_attacks: cfg.selected_attacks,
         attacks_per_category: cfg.attacks_per_category,
@@ -222,33 +226,39 @@ export default function PreviewPage() {
       <div className="card p-6">
         <h2 className="font-headline text-base font-black tracking-tight text-[var(--color-on-surface)] mb-4">
           Testing Tools
-          {Object.keys(toolStatus).length > 0 && (
+          {toolStatus && Object.keys(toolStatus).length > 0 && (
             <span className="ml-2 text-xs font-normal text-[var(--color-on-surface-variant)] opacity-60">
               {Object.values(toolStatus).filter((t) => t.installed).length}/{Object.keys(toolStatus).length} installed
             </span>
           )}
         </h2>
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-          {Object.entries(toolStatus).map(([key, status]) => {
-            const installed = status.installed;
-            const icon = TOOL_ICONS[key] || "build";
-            const label = key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-            return (
-              <div key={key} className={`p-3 rounded-xl border ${installed ? "border-[var(--color-secondary)] bg-[rgba(0,110,47,0.04)]" : "border-[var(--color-outline-variant)]"}`}>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className={`material-symbols-outlined text-sm ${installed ? "text-secondary" : "text-[var(--color-on-surface-variant)]"}`}>{icon}</span>
-                  <span className="text-xs font-black">{label}</span>
-                  <span className={`ml-auto text-[10px] font-bold ${installed ? "text-secondary" : "text-[var(--color-on-surface-variant)] opacity-60"}`}>
-                    {installed ? "✓" : "⚠"}
-                  </span>
+        {toolStatus === null ? (
+          <div className="flex items-center gap-2 text-sm text-[var(--color-on-surface-variant)] opacity-60">
+            <span className="material-symbols-outlined text-base animate-spin">progress_activity</span>
+            Checking tools…
+          </div>
+        ) : Object.keys(toolStatus).length === 0 ? (
+          <p className="text-sm text-[var(--color-on-surface-variant)] opacity-60">Tool check unavailable — tests will still run with built-in fallbacks.</p>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+            {Object.entries(toolStatus).map(([key, status]) => {
+              const installed = status.installed;
+              const icon = TOOL_ICONS[key] || "build";
+              const label = key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+              return (
+                <div key={key} className={`p-3 rounded-xl border ${installed ? "border-[var(--color-secondary)] bg-[rgba(0,110,47,0.04)]" : "border-[var(--color-outline-variant)]"}`}>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={`material-symbols-outlined text-sm ${installed ? "text-secondary" : "text-[var(--color-on-surface-variant)]"}`}>{icon}</span>
+                    <span className="text-xs font-black">{label}</span>
+                    <span className={`ml-auto text-[10px] font-bold ${installed ? "text-secondary" : "text-[var(--color-on-surface-variant)] opacity-60"}`}>
+                      {installed ? "✓" : "⚠"}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-60 leading-tight">{status.used_for || status.description}</p>
                 </div>
-                <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-60 leading-tight">{status.used_for || status.description}</p>
-              </div>
-            );
-          })}
-        </div>
-        {Object.keys(toolStatus).length === 0 && (
-          <p className="text-sm text-[var(--color-on-surface-variant)] opacity-60">Loading tool status…</p>
+              );
+            })}
+          </div>
         )}
       </div>
 

@@ -61,7 +61,7 @@ export default function PreviewPage() {
     // Fetch tool status with timeout — slow package imports can block the backend
     const toolsController = new AbortController();
     const toolsTimeout = setTimeout(() => toolsController.abort(), 6000);
-    fetch(`${API}/api/tools/status`, { signal: toolsController.signal })
+    authFetch(`${API}/api/tools/status`, { signal: toolsController.signal })
       .then((r) => r.json())
       .then((data) => { clearTimeout(toolsTimeout); setToolStatus(data); })
       .catch(() => { clearTimeout(toolsTimeout); setToolStatus({}); });

@@ -85,7 +85,11 @@ export default function LoginPage() {
           console.warn("[Login] Tokens not found after waiting; proceeding anyway (will be stored soon)");
         }
 
+        // Set session cookie so the middleware (proxy.ts) allows /dashboard access
+        document.cookie = "metron_session=1; path=/; SameSite=Lax";
+
         setLoading(false);
+        console.log("[Login] Current pathname BEFORE navigation:", window.location.pathname);
         console.log("[Login] Proceeding to navigate to /dashboard...");
 
         // Use window.location.href for hard navigation to ensure fresh page load with tokens
@@ -105,7 +109,7 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[var(--color-background)]">
+    <div className="flex min-h-screen w-screen bg-[var(--color-background)]">
       {/* ─── Left Brand Panel ─────────────────────────────── */}
       <div className="hidden lg:flex lg:w-1/2 flex-col justify-between p-16 relative overflow-hidden bg-gradient-to-br from-[#001e2c] via-[#004c69] to-[#00668a]">
         <div className="absolute -top-32 -left-32 w-[500px] h-[500px] rounded-full bg-white/5 blur-3xl" />
@@ -208,7 +212,13 @@ export default function LoginPage() {
               </div>
             </div>
 
-            <div className="flex justify-end pt-1">
+            <div className="flex justify-between items-center pt-1">
+              <p className="text-xs text-[var(--color-on-surface-variant)] font-medium">
+                Don&apos;t have an account?{" "}
+                <a href="/register" className="text-[var(--color-primary)] font-bold hover:underline">
+                  Create one
+                </a>
+              </p>
               <a href="#" className="text-xs font-bold text-[var(--color-primary)] hover:text-[var(--color-primary-container)] transition-colors">Forgot password?</a>
             </div>
 
@@ -248,14 +258,6 @@ export default function LoginPage() {
             Google Workspace
           </button>
 
-          <footer className="pt-8 text-center">
-            <p className="text-xs text-[var(--color-on-surface-variant)] font-medium">
-              Don&apos;t have an account?{" "}
-              <a href="/register" className="text-[var(--color-primary)] font-bold hover:underline">
-                Create one
-              </a>
-            </p>
-          </footer>
         </div>
       </div>
     </div>

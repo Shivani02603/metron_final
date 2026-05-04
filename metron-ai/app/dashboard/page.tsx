@@ -34,23 +34,63 @@ export default function ProjectHub() {
 
   // Load persisted projects from API on mount
   useEffect(() => {
+    console.log("[DashboardPage] Fetching projects from /api/projects...");
     authFetch("/api/projects")
-      .then((r) => r.json())
-      .then((data) => {
-        if (!data.projects) return;
-        setProjects(
-          data.projects.map((p: { project_id: string; name: string; endpoint: string }) => ({
-            id: p.project_id,
-            name: p.name || p.endpoint,
-            endpoint: p.endpoint,
-            status: "Ready",
-            runs: 0,
-            lastScore: "---",
-            type: "AI System",
-          }))
-        );
+      .then((r) => {
+        console.log("[DashboardPage] API response status:", r.status);
+        if (!r.ok) {
+          console.error("[DashboardPage] API returned non-ok status:", r.status, r.statusText);
+          return r.json().then(data => {
+            console.error("[DashboardPage] Error response:", data);
+            throw new Error(`API error: ${r.status}`);
+          });
+        }
+        return r.json();
       })
-      .catch(() => {});
+      .then((data) => {
+        console.log("[DashboardPage] Projects loaded:", data);
+        if (!data.projects) return;
+        const projectList = data.projects.map((p: { project_id: string; name: string; endpoint: string }) => ({
+          id: p.project_id,
+          name: p.name || p.endpoint,
+          endpoint: p.endpoint,
+          status: "Ready",
+          runs: 0,
+          lastScore: "---" as number | string,
+          type: "AI System",
+        }));
+        setProjects(projectList);
+
+        // Fetch runs for each project to populate actual counts and last compliance score
+        Promise.all(
+          projectList.map((proj: { id: string }) =>
+            authFetch(`/api/project/${proj.id}/runs`)
+              .then((r) => r.ok ? r.json() : { runs: [] })
+              .then((runsData) => {
+                const runs: Array<{ health_score: number | null }> = runsData.runs || [];
+                const lastRun = runs[0];
+                return {
+                  id: proj.id,
+                  runs: runs.length,
+                  lastScore: lastRun?.health_score != null
+                    ? Math.round(lastRun.health_score * 100)
+                    : ("---" as number | string),
+                };
+              })
+              .catch(() => ({ id: proj.id, runs: 0, lastScore: "---" as number | string }))
+          )
+        ).then((results) => {
+          setProjects((prev) =>
+            prev.map((p) => {
+              const r = results.find((x) => x.id === p.id);
+              return r ? { ...p, runs: r.runs, lastScore: r.lastScore } : p;
+            })
+          );
+        });
+      })
+      .catch((err) => {
+        console.error("[DashboardPage] Failed to load projects:", err);
+      });
   }, []);
 
   const handleProjectClick = (projectId: string) => {

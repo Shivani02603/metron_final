@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { authFetch } from "@/lib/api";
 
 const API = "";
 
@@ -133,7 +134,7 @@ export default function ConfigurePage() {
 
   // Load providers
   useEffect(() => {
-    fetch(`${API}/api/providers`)
+    authFetch(`${API}/api/providers`)
       .then((r) => r.json())
       .then((data) => setProviders(data))
       .catch(() => {});
@@ -143,7 +144,7 @@ export default function ConfigurePage() {
     if (!endpointUrl) return;
     setConnectionStatus("testing");
     try {
-      const res = await fetch(`${API}/api/connect-test`, {
+      const res = await authFetch(`${API}/api/connect-test`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -175,7 +176,7 @@ export default function ConfigurePage() {
     setIsGenerating(true);
     setGenerateError("");
     try {
-      const res = await fetch(`${API}/api/preview`, {
+      const res = await authFetch(`${API}/api/preview`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -290,7 +291,7 @@ export default function ConfigurePage() {
     // Step 3: Generate personas/scenarios only if not already done
     if (personas.length === 0) {
       try {
-        const res = await fetch(`${API}/api/preview`, {
+        const res = await authFetch(`${API}/api/preview`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -340,7 +341,7 @@ export default function ConfigurePage() {
       fd.append("llm_api_key",    llmApiKey);
       fd.append("azure_endpoint", azureEndpoint);
 
-      const res = await fetch(`${API}/api/parse-architecture`, { method: "POST", body: fd });
+      const res = await authFetch(`${API}/api/parse-architecture`, { method: "POST", body: fd });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
 

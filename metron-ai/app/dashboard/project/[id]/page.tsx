@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { authFetch } from "@/lib/api";
 
 interface Run {
   run_id: string;
@@ -33,12 +34,8 @@ export default function ProjectLanding() {
     if (!projectId) return;
 
     Promise.all([
-      fetch(`/api/projects/${projectId}`, { credentials: "include" }).then((r) =>
-        r.ok ? r.json() : null
-      ),
-      fetch(`/api/project/${projectId}/runs`, { credentials: "include" }).then((r) =>
-        r.ok ? r.json() : { runs: [] }
-      ),
+      authFetch(`/api/projects/${projectId}`).then((r) => r.ok ? r.json() : null),
+      authFetch(`/api/project/${projectId}/runs`).then((r) => r.ok ? r.json() : { runs: [] }),
     ])
       .then(([proj, runsData]) => {
         if (!proj) {

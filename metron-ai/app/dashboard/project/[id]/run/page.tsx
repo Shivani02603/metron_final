@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { authFetch } from "@/lib/api";
 
 const API = "";
 const POLL_INTERVAL = 2500;
@@ -389,7 +390,7 @@ export default function RunPage() {
 
   const poll = useCallback(async (id: string) => {
     try {
-      const res = await fetch(`${API}/api/job/${id}/status`);
+      const res = await authFetch(`${API}/api/job/${id}/status`);
       if (!res.ok) return;
       const data: JobStatus = await res.json();
       setJobStatus(data);

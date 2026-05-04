@@ -21,19 +21,17 @@ export default function DashboardLayout({
   });
 
   useEffect(() => {
-    console.log("[DashboardLayout] ✓ Component mounted at", new Date().toISOString(), "pathname:", pathname);
+    console.log("[DashboardLayout] ✓ Component mounted");
+    console.log("[DashboardLayout] Current URL:", window.location.href);
+    console.log("[DashboardLayout] Current pathname:", pathname);
     let isMounted = true;
 
     fetchAuthSession()
       .then((session) => {
         if (!isMounted) return;
-        console.log("[DashboardLayout] First fetchAuthSession result:", {
+        console.log("[DashboardLayout] ✓ fetchAuthSession succeeded:", {
           hasTokens: !!session.tokens,
-          tokenKeys: session.tokens ? Object.keys(session.tokens) : [],
-          hasIdToken: !!session.tokens?.idToken,
-          hasAccessToken: !!session.tokens?.accessToken,
-          idTokenPayload: session.tokens?.idToken?.payload,
-          credentialsSource: (session as any)?.credentials?.source,
+          email: session.tokens?.idToken?.payload?.email || "NO EMAIL",
         });
 
         if (session.tokens) {
@@ -86,6 +84,7 @@ export default function DashboardLayout({
 
   const handleLogout = async () => {
     await signOut();
+    document.cookie = "metron_session=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
     window.location.href = "/";
   };
 

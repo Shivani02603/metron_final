@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useState, useEffect, Suspense } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { authFetch } from "@/lib/api";
 
-const API = "http://localhost:8000";
+const API = "";
 
 // ── Metric display name mapping ───────────────────────────────────────────────
 const METRIC_LABELS: Record<string, string> = {
@@ -155,8 +156,22 @@ interface FullResults {
 
 // ─────────────────────────────── Component ────────────────────────────────────
 export default function ResultsPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex flex-col items-center justify-center h-64 gap-4">
+        <span className="material-symbols-outlined text-4xl text-primary animate-spin">progress_activity</span>
+        <p className="text-sm text-[var(--color-on-surface-variant)] opacity-60">Loading results…</p>
+      </div>
+    }>
+      <ResultsContent />
+    </Suspense>
+  );
+}
+
+function ResultsContent() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const projectId = params.id as string;
 
   const [results, setResults] = useState<FullResults | null>(null);
@@ -165,14 +180,15 @@ export default function ResultsPage() {
   const [activeTab, setActiveTab] = useState(0);
 
   useEffect(() => {
-    const runId = sessionStorage.getItem(`run_id_${projectId}`);
+    const runId =
+      searchParams.get("run") || sessionStorage.getItem(`run_id_${projectId}`);
     if (!runId) {
       setError("No run ID found. Please run the test suite first.");
       setLoading(false);
       return;
     }
 
-    fetch(`${API}/api/job/${runId}/results`)
+    authFetch(`${API}/api/job/${runId}/results`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();

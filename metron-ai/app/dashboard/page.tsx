@@ -1,7 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { authFetch } from "@/lib/api";
+
+console.log("[DashboardPage] Component file loaded at", new Date().toISOString());
 
 interface Project {
   id: string;
@@ -26,6 +29,69 @@ export default function ProjectHub() {
   const [submitError, setSubmitError] = useState("");
 
   const [projects, setProjects] = useState<Project[]>([]);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  // Load persisted projects from API on mount
+  useEffect(() => {
+    console.log("[DashboardPage] Fetching projects from /api/projects...");
+    authFetch("/api/projects")
+      .then((r) => {
+        console.log("[DashboardPage] API response status:", r.status);
+        if (!r.ok) {
+          console.error("[DashboardPage] API returned non-ok status:", r.status, r.statusText);
+          return r.json().then(data => {
+            console.error("[DashboardPage] Error response:", data);
+            throw new Error(`API error: ${r.status}`);
+          });
+        }
+        return r.json();
+      })
+      .then((data) => {
+        console.log("[DashboardPage] Projects loaded:", data);
+        if (!data.projects) return;
+        const projectList = data.projects.map((p: { project_id: string; name: string; endpoint: string }) => ({
+          id: p.project_id,
+          name: p.name || p.endpoint,
+          endpoint: p.endpoint,
+          status: "Ready",
+          runs: 0,
+          lastScore: "---" as number | string,
+          type: "AI System",
+        }));
+        setProjects(projectList);
+
+        // Fetch runs for each project to populate actual counts and last compliance score
+        Promise.all(
+          projectList.map((proj: { id: string }) =>
+            authFetch(`/api/project/${proj.id}/runs`)
+              .then((r) => r.ok ? r.json() : { runs: [] })
+              .then((runsData) => {
+                const runs: Array<{ health_score: number | null }> = runsData.runs || [];
+                const lastRun = runs[0];
+                return {
+                  id: proj.id,
+                  runs: runs.length,
+                  lastScore: lastRun?.health_score != null
+                    ? Math.round(lastRun.health_score * 100)
+                    : ("---" as number | string),
+                };
+              })
+              .catch(() => ({ id: proj.id, runs: 0, lastScore: "---" as number | string }))
+          )
+        ).then((results) => {
+          setProjects((prev) =>
+            prev.map((p) => {
+              const r = results.find((x) => x.id === p.id);
+              return r ? { ...p, runs: r.runs, lastScore: r.lastScore } : p;
+            })
+          );
+        });
+      })
+      .catch((err) => {
+        console.error("[DashboardPage] Failed to load projects:", err);
+      });
+  }, []);
 
   const handleProjectClick = (projectId: string) => {
     router.push(`/dashboard/project/${projectId}`);
@@ -42,26 +108,43 @@ export default function ProjectHub() {
     setSubmitError("");
 
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       const tempId = Date.now().toString();
-      sessionStorage.setItem(
-        `project_${tempId}`,
-        JSON.stringify({
-          name: projectName || projectEndpoint,
-          endpoint: projectEndpoint,
-          apiKey: apiKey,
-          documentText: reader.result as string,
-          documentName: uploadedFile.name,
-        })
-      );
+      const projectData = {
+        name: projectName || projectEndpoint,
+        endpoint: projectEndpoint,
+        apiKey: apiKey,
+        documentText: reader.result as string,
+        documentName: uploadedFile!.name,
+      };
 
-      // Add to projects grid for display
+      // Write to sessionStorage for current session sub-pages
+      sessionStorage.setItem(`project_${tempId}`, JSON.stringify(projectData));
+
+      // Persist to server so it survives logout/login
+      try {
+        await authFetch("/api/projects", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            project_id: tempId,
+            name: projectData.name,
+            endpoint: projectData.endpoint,
+            api_key: projectData.apiKey,
+            document_text: projectData.documentText,
+            document_name: projectData.documentName,
+          }),
+        });
+      } catch {
+        // Non-fatal — session still works
+      }
+
       setProjects((prev) => [
         ...prev,
         {
           id: tempId,
-          name: projectName || projectEndpoint,
-          endpoint: projectEndpoint,
+          name: projectData.name,
+          endpoint: projectData.endpoint,
           status: "Ready",
           runs: 0,
           lastScore: "---",
@@ -76,7 +159,6 @@ export default function ProjectHub() {
       setApiKey("");
       setUploadedFile(null);
 
-      // Go to splitter — user picks Full Suite or Custom there
       router.push(`/dashboard/project/${tempId}`);
     };
 
@@ -92,6 +174,22 @@ export default function ProjectHub() {
     if (!isSubmitting) {
       setShowModal(false);
       setSubmitError("");
+    }
+  };
+
+  const handleDeleteProject = async (projectId: string) => {
+    setIsDeleting(true);
+    try {
+      await authFetch(`/api/projects/${projectId}`, {
+        method: "DELETE",
+      });
+      setProjects((prev) => prev.filter((p) => p.id !== projectId));
+      sessionStorage.removeItem(`project_${projectId}`);
+    } catch {
+      // silently ignore — tile stays if request fails
+    } finally {
+      setIsDeleting(false);
+      setConfirmDeleteId(null);
     }
   };
 
@@ -133,7 +231,7 @@ export default function ProjectHub() {
         {projects.map((proj) => (
           <div
             key={proj.id}
-            onClick={() => handleProjectClick(proj.id)}
+            onClick={() => confirmDeleteId === proj.id ? null : handleProjectClick(proj.id)}
             className="group relative p-8 rounded-[2.5rem] bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] border-opacity-20 shadow-card hover:shadow-card-lg transition-all cursor-pointer overflow-hidden animate-fade-in"
           >
             <div className="absolute inset-0 bg-gradient-to-br from-primary/0 to-primary/3 opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -144,9 +242,39 @@ export default function ProjectHub() {
                     {proj.type === "RAG System" ? "database" : proj.type === "Chatbot" ? "forum" : "hub"}
                   </span>
                 </div>
-                <div className="px-3 py-1.5 rounded-full bg-[#6bff8f]/10 border border-[#6bff8f]/20 flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#006e2f] pulse-orb" />
-                  <span className="text-[9px] font-black uppercase tracking-widest text-[#006e2f]">{proj.status}</span>
+                <div className="flex items-center gap-2">
+                  {confirmDeleteId === proj.id ? (
+                    <div className="flex items-center gap-2 animate-fade-in" onClick={(e) => e.stopPropagation()}>
+                      <span className="text-[10px] font-black text-red-500 uppercase tracking-wider">Delete?</span>
+                      <button
+                        disabled={isDeleting}
+                        onClick={() => handleDeleteProject(proj.id)}
+                        className="px-3 py-1.5 rounded-xl bg-red-500 text-white text-[10px] font-black uppercase tracking-wider hover:bg-red-600 transition-colors disabled:opacity-50"
+                      >
+                        {isDeleting ? "..." : "Yes"}
+                      </button>
+                      <button
+                        onClick={() => setConfirmDeleteId(null)}
+                        className="px-3 py-1.5 rounded-xl bg-[var(--color-surface-container-low)] text-[var(--color-on-surface)] text-[10px] font-black uppercase tracking-wider hover:bg-[var(--color-surface-variant)] transition-colors"
+                      >
+                        No
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(proj.id); }}
+                        className="w-9 h-9 rounded-xl flex items-center justify-center text-[var(--color-outline)] opacity-0 group-hover:opacity-100 hover:bg-red-50 hover:text-red-500 transition-all"
+                        title="Delete project"
+                      >
+                        <span className="material-symbols-outlined text-lg">delete</span>
+                      </button>
+                      <div className="px-3 py-1.5 rounded-full bg-[#6bff8f]/10 border border-[#6bff8f]/20 flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-[#006e2f] pulse-orb" />
+                        <span className="text-[9px] font-black uppercase tracking-widest text-[#006e2f]">{proj.status}</span>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
               <div className="space-y-1.5">
@@ -253,6 +381,7 @@ export default function ProjectHub() {
                 <div className="relative group p-8 border-2 border-dashed border-[var(--color-outline-variant)] border-opacity-30 rounded-[2rem] bg-[var(--color-surface-container-low)]/50 hover:bg-primary/5 hover:border-primary/50 transition-all text-center space-y-3 cursor-pointer overflow-hidden">
                   <input
                     type="file"
+                    aria-label="Upload System Document"
                     className="absolute inset-0 opacity-0 cursor-pointer z-20"
                     onChange={handleFileUpload}
                     accept=".txt,.md,.json,.pdf,.docx"

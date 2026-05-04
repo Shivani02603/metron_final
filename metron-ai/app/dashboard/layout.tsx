@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { fetchAuthSession, signOut } from "aws-amplify/auth";
 
 export default function DashboardLayout({
   children,
@@ -12,9 +13,79 @@ export default function DashboardLayout({
   const pathname = usePathname();
   const router = useRouter();
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [userEmail, setUserEmail] = useState("");
 
-  const handleLogout = () => {
-    router.push("/");
+  console.log("[DashboardLayout] Rendering (not just mounted)", {
+    pathname,
+    timestamp: new Date().toISOString()
+  });
+
+  useEffect(() => {
+    console.log("[DashboardLayout] ✓ Component mounted");
+    console.log("[DashboardLayout] Current URL:", window.location.href);
+    console.log("[DashboardLayout] Current pathname:", pathname);
+    let isMounted = true;
+
+    fetchAuthSession()
+      .then((session) => {
+        if (!isMounted) return;
+        console.log("[DashboardLayout] ✓ fetchAuthSession succeeded:", {
+          hasTokens: !!session.tokens,
+          email: session.tokens?.idToken?.payload?.email || "NO EMAIL",
+        });
+
+        if (session.tokens) {
+          const email = (session.tokens.idToken?.payload?.email as string) ?? "";
+          console.log("[DashboardLayout] Got email from token on first try:", email);
+          setUserEmail(email);
+          return;
+        }
+
+        // tokens absent — one retry after a tick (handles Amplify init race)
+        console.log("[DashboardLayout] No tokens on first attempt, waiting 300ms and retrying...");
+        return new Promise<void>((resolve) => setTimeout(resolve, 300))
+          .then(() => {
+            if (!isMounted) return Promise.resolve(undefined);
+            console.log("[DashboardLayout] Retrying fetchAuthSession...");
+            return fetchAuthSession();
+          })
+          .then((s) => {
+            if (!isMounted || !s) return;
+            console.log("[DashboardLayout] Second fetchAuthSession result:", {
+              hasTokens: !!s.tokens,
+              tokenKeys: s.tokens ? Object.keys(s.tokens) : [],
+              hasIdToken: !!s.tokens?.idToken,
+            });
+
+            if (s.tokens) {
+              const email = (s.tokens.idToken?.payload?.email as string) ?? "";
+              console.log("[DashboardLayout] Got email from token on retry:", email);
+              setUserEmail(email);
+            } else {
+              console.warn("[DashboardLayout] Still no tokens after retry, but allowing dashboard to load");
+            }
+          });
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        console.error("[DashboardLayout] Error fetching auth session:", {
+          message: err?.message,
+          code: (err as any)?.code,
+          name: err?.name,
+          fullError: err
+        });
+        console.warn("[DashboardLayout] Auth session fetch failed, but allowing dashboard to load (API calls will handle auth)");
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [router]);
+
+  const handleLogout = async () => {
+    await signOut();
+    document.cookie = "metron_session=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
+    window.location.href = "/";
   };
 
   const navLinks = [
@@ -33,6 +104,7 @@ export default function DashboardLayout({
       >
         {/* Toggle Button (The Closing Arrow) */}
         <button 
+          type="button"
           onClick={() => setIsCollapsed(!isCollapsed)}
           className="absolute -right-3 top-20 w-6 h-6 rounded-full bg-white border border-outline-variant/30 flex items-center justify-center text-primary shadow-sm hover:shadow-md transition-all z-[110]"
         >
@@ -84,16 +156,15 @@ export default function DashboardLayout({
         <div className={`p-4 border-t border-[var(--color-outline-variant)] border-opacity-10 ${isCollapsed ? 'px-2' : ''}`}>
           <div className={`flex items-center gap-3 p-2.5 rounded-2xl bg-[var(--color-surface-container-low)] transition-all ${isCollapsed ? 'justify-center rounded-xl px-0' : ''}`}>
             <div className="w-10 h-10 min-w-[40px] rounded-full bg-gradient-to-br from-[#00668a] to-[#38bdf8] flex items-center justify-center text-white text-xs font-bold ring-2 ring-white shadow-sm">
-              SJ
+              {userEmail ? userEmail[0].toUpperCase() : "?"}
             </div>
             {!isCollapsed && (
               <div className="flex-1 overflow-hidden animate-fade-in">
-                <p className="text-xs font-black text-[var(--color-on-surface)] truncate">Shivani J.</p>
-                <p className="text-[9px] font-bold text-primary uppercase tracking-widest opacity-60">Admin</p>
+                <p className="text-xs font-black text-[var(--color-on-surface)] truncate">{userEmail}</p>
               </div>
             )}
             {!isCollapsed && (
-              <button onClick={handleLogout} className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--color-outline)] hover:text-red-500 hover:bg-red-50 transition-all">
+              <button type="button" onClick={handleLogout} className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--color-outline)] hover:text-red-500 hover:bg-red-50 transition-all">
                 <span className="material-symbols-outlined text-xl">logout</span>
               </button>
             )}

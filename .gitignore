@@ -49,11 +49,14 @@ venv/
 ENV/
 .venv
 
-# Environment files
+# Environment files — real secrets (never commit these)
 .env
 .env.local
 .env.*.local
-.env.example
+# .env.example and users.json.example ARE committed (they're templates with no real secrets)
+
+# Auth — real user list with plaintext passwords (never commit)
+users.json
 
 # IDE / Editor
 .vscode/

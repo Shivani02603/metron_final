@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { authFetch } from "@/lib/api";
 
-const API = "http://localhost:8000";
+const API = "";
 const POLL_INTERVAL = 2500;
 
 const METRIC_LABELS: Record<string, string> = {
@@ -389,7 +390,7 @@ export default function RunPage() {
 
   const poll = useCallback(async (id: string) => {
     try {
-      const res = await fetch(`${API}/api/job/${id}/status`);
+      const res = await authFetch(`${API}/api/job/${id}/status`);
       if (!res.ok) return;
       const data: JobStatus = await res.json();
       setJobStatus(data);
@@ -512,7 +513,7 @@ export default function RunPage() {
       {status === "completed" && (
         <div className="flex justify-center pt-4">
           <button
-            onClick={() => router.push(`/dashboard/project/${projectId}/results`)}
+            onClick={() => router.push(`/dashboard/project/${projectId}/results${runId ? `?run=${runId}` : ""}`)}
             className="group flex items-center gap-3 px-10 py-4 rounded-2xl btn-primary text-sm shadow-xl shadow-primary/10"
           >
             <span className="material-symbols-outlined text-xl">bar_chart</span>

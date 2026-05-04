@@ -131,14 +131,16 @@ def _is_factual_reference(text: str) -> bool:
     return len(text) >= 200
 
 
-def _configure_deepeval(llm_provider: str, llm_api_key: str) -> None:
+def _configure_deepeval(llm_provider: str, llm_api_key: str, azure_endpoint: str = "") -> None:
     """Ensure Azure env vars are set so the AzureOpenAI client resolves correctly."""
     try:
         import os
         p = llm_provider.lower()
         if "azure" in p and llm_api_key:
             os.environ["AZURE_OPENAI_API_KEY"] = llm_api_key
-        elif "openai" in p and llm_api_key:
+        if "azure" in p and azure_endpoint:
+            os.environ["AZURE_OPENAI_ENDPOINT"] = azure_endpoint
+        if "openai" in p and "azure" not in p and llm_api_key:
             os.environ["OPENAI_API_KEY"] = llm_api_key
     except Exception:
         pass
@@ -147,13 +149,17 @@ def _configure_deepeval(llm_provider: str, llm_api_key: str) -> None:
 def _set_azure_env(config: RunConfig) -> None:
     """
     Ensure Azure OpenAI env vars are populated for RAGAS and DeepEval tool calls.
-    Reads from RunConfig.llm_api_key when provider is Azure, falls back to existing env.
+    Reads from RunConfig.llm_api_key / azure_endpoint when provider is Azure.
     Also sets OPENAI_API_VERSION which langchain_openai requires.
     """
     import os
     provider = (config.llm_provider or "").lower()
-    if "azure" in provider and config.llm_api_key:
-        os.environ.setdefault("AZURE_OPENAI_API_KEY", config.llm_api_key)
+    if "azure" in provider:
+        if config.llm_api_key:
+            os.environ["AZURE_OPENAI_API_KEY"] = config.llm_api_key
+        azure_endpoint = getattr(config, "azure_endpoint", "") or ""
+        if azure_endpoint:
+            os.environ["AZURE_OPENAI_ENDPOINT"] = azure_endpoint
     os.environ.setdefault("OPENAI_API_VERSION", os.environ.get("AZURE_API_VERSION", "2025-01-01-preview"))
 
 
@@ -422,7 +428,7 @@ async def evaluate_functional(
     persona_map = {p.persona_id: p for p in personas}
     results: List[MetricResult] = []
 
-    _configure_deepeval(config.llm_provider, config.llm_api_key)
+    _configure_deepeval(config.llm_provider, config.llm_api_key, getattr(config, "azure_endpoint", "") or "")
     deval_model = make_deepeval_azure_model()
     if deval_model is None:
         print("[FunctionalEval] WARNING: Azure OpenAI not configured — DeepEval metrics "

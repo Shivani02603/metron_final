@@ -10,9 +10,15 @@ import os
 import uuid
 from typing import Any, Dict, Optional
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+load_dotenv()
 
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from core.auth import get_current_user
 from core.config import CORS_ORIGINS, LLM_PROVIDERS
 from core.llm_client import LLMClient
 from core.models import (
@@ -44,24 +50,35 @@ jobs: Dict[str, Dict[str, Any]] = {}
 
 @app.on_event("startup")
 async def _startup():
-    """Fix 21+28: init DB and re-populate in-memory jobs from recent completed runs."""
+    """Init DB and re-populate in-memory jobs from recent completed/failed runs."""
     try:
         _db.init_db()
         for row in _db.load_recent_jobs(hours=24):
             run_id = row["run_id"]
+            is_failed = row["status"] == "failed"
             jobs[run_id] = {
                 "status":        row["status"],
                 "progress":      100,
-                "message":       "Completed (recovered from DB)",
+                "message":       "Failed (recovered from DB)" if is_failed else "Completed (recovered from DB)",
                 "current_phase": "",
                 "phase_results": {},
                 "log_events":    [],
-                "error":         None,
-                "results":       row.get("results"),
+                "error":         row.get("results", {}).get("error") if is_failed else None,
+                "results":       None if is_failed else row.get("results"),
+                "user_email":    row.get("user_email", ""),
+                "project_id":    row.get("project_id", ""),
+                "eval_warnings": [],
             }
         print(f"[DB] Recovered {len(jobs)} recent runs from SQLite on startup.")
     except Exception as e:
         print(f"[DB] Startup recovery failed (non-fatal): {e}")
+
+
+def _check_job_ownership(job: Dict, user_email: str) -> None:
+    """Raise 403 if the job has an owner and it doesn't match the requesting user."""
+    owner = job.get("user_email", "")
+    if owner and owner != user_email:
+        raise HTTPException(status_code=403, detail="Access denied: this run belongs to another user")
 
 # ──────────────────────────────────────────────────────────────────────────
 # GET /api/providers — list LLM providers
@@ -86,80 +103,72 @@ async def get_providers():
 # ──────────────────────────────────────────────────────────────────────────
 @app.get("/api/tools/status")
 async def get_tools_status():
-    tools = {}
+    loop = asyncio.get_event_loop()
 
-    def _check(pkg: str, attr: str = "") -> bool:
+    def _check(pkg: str) -> bool:
+        import sys
+        if pkg in sys.modules:
+            return True
         try:
-            mod = __import__(pkg)
-            if attr:
-                return hasattr(mod, attr) or True  # sub-import check
+            __import__(pkg)
             return True
         except ImportError:
             return False
         except Exception:
             return False
 
-    def _check_sub(pkg: str, subpath: str) -> bool:
-        """Check a submodule import like 'deepeval.metrics.GEval'."""
+    async def _safe_check(pkg: str) -> bool:
         try:
-            parts = subpath.split(".")
-            mod = __import__(pkg)
-            for part in parts:
-                mod = getattr(mod, part, None)
-                if mod is None:
-                    return False
-            return True
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, _check, pkg),
+                timeout=5.0,
+            )
         except Exception:
             return False
 
-    # PII detection
-    presidio_ok = _check("presidio_analyzer")
-    tools["presidio"] = {
-        "installed": presidio_ok,
-        "description": "PII detection (Presidio — replaces LLM PII guessing)",
-        "used_for": "pii_leakage metric in security evaluation",
-    }
+    presidio_ok, detoxify_ok, llmguard_ok, deepeval_ok, ragas_ok = await asyncio.gather(
+        _safe_check("presidio_analyzer"),
+        _safe_check("detoxify"),
+        _safe_check("llm_guard"),
+        _safe_check("deepeval"),
+        _safe_check("ragas"),
+    )
 
-    # Toxicity classifier
-    detoxify_ok = _check("detoxify")
-    tools["detoxify"] = {
-        "installed": detoxify_ok,
-        "description": "Toxicity classifier (Detoxify — replaces LLM toxicity scoring)",
-        "used_for": "toxicity metric in security evaluation",
+    return {
+        "presidio": {
+            "installed": presidio_ok,
+            "description": "PII detection (Presidio — replaces LLM PII guessing)",
+            "used_for": "pii_leakage metric in security evaluation",
+        },
+        "detoxify": {
+            "installed": detoxify_ok,
+            "description": "Toxicity classifier (Detoxify — replaces LLM toxicity scoring)",
+            "used_for": "toxicity metric in security evaluation",
+        },
+        "llm_guard": {
+            "installed": llmguard_ok,
+            "description": "Prompt injection scanner (LLM Guard — replaces LLM injection guessing)",
+            "used_for": "prompt_injection metric in security evaluation",
+        },
+        "deepeval": {
+            "installed": deepeval_ok,
+            "description": "Structured LLM evaluation (DeepEval — GEval, Hallucination, Bias, Relevancy)",
+            "used_for": "hallucination + answer_relevancy in functional; geval in quality; bias in security",
+        },
+        "ragas": {
+            "installed": ragas_ok,
+            "description": "RAG evaluation framework (RAGAS — structural faithfulness, no LLM)",
+            "used_for": "ragas_faithfulness in quality evaluation (RAG mode only)",
+        },
     }
-
-    # Prompt injection scanner
-    llmguard_ok = _check("llm_guard")
-    tools["llm_guard"] = {
-        "installed": llmguard_ok,
-        "description": "Prompt injection scanner (LLM Guard — replaces LLM injection guessing)",
-        "used_for": "prompt_injection metric in security evaluation",
-    }
-
-    # DeepEval
-    deepeval_ok = _check("deepeval")
-    tools["deepeval"] = {
-        "installed": deepeval_ok,
-        "description": "Structured LLM evaluation (DeepEval — GEval, Hallucination, Bias, Relevancy)",
-        "used_for": "hallucination + answer_relevancy in functional; geval in quality; bias in security",
-    }
-
-    # RAGAS
-    ragas_ok = _check("ragas")
-    tools["ragas"] = {
-        "installed": ragas_ok,
-        "description": "RAG evaluation framework (RAGAS — structural faithfulness, no LLM)",
-        "used_for": "ragas_faithfulness in quality evaluation (RAG mode only)",
-    }
-
-    return tools
 
 
 # ──────────────────────────────────────────────────────────────────────────
 # POST /api/connect-test — test chatbot endpoint connectivity
 # ──────────────────────────────────────────────────────────────────────────
 @app.post("/api/connect-test")
-async def connect_test(req: ConnectTestRequest):
+async def connect_test(req: ConnectTestRequest, request: Request):
+    get_current_user(request)
     adapter = ChatbotAdapter(
         endpoint_url=req.endpoint_url,
         request_field=req.request_field,
@@ -177,13 +186,14 @@ async def connect_test(req: ConnectTestRequest):
 # POST /api/parse-document — NEW: seed doc → AppProfile
 # ──────────────────────────────────────────────────────────────────────────
 @app.post("/api/parse-document")
-async def parse_document_endpoint(req: ParseDocumentRequest):
+async def parse_document_endpoint(req: ParseDocumentRequest, request: Request):
+    get_current_user(request)
     if not req.document_text.strip():
         raise HTTPException(400, "document_text is required")
     if not req.llm_api_key and not _env_key_set(req.llm_provider):
         raise HTTPException(400, f"API key required for {req.llm_provider}")
 
-    llm_client = LLMClient(req.llm_provider, req.llm_api_key)
+    llm_client = LLMClient(req.llm_provider, req.llm_api_key, azure_endpoint=req.azure_endpoint)
     profile = await parse_document(req.document_text, llm_client)
     return {
         "application_type":  profile.application_type.value,
@@ -202,11 +212,14 @@ async def parse_document_endpoint(req: ParseDocumentRequest):
 # ──────────────────────────────────────────────────────────────────────────
 @app.post("/api/parse-architecture")
 async def parse_architecture_endpoint(
-    content:      str           = Form(""),
-    image:        Optional[UploadFile] = File(None),
-    llm_provider: str           = Form("Groq"),
-    llm_api_key:  str           = Form(""),
+    request:        Request,
+    content:        str           = Form(""),
+    image:          Optional[UploadFile] = File(None),
+    llm_provider:   str           = Form("Groq"),
+    llm_api_key:    str           = Form(""),
+    azure_endpoint: str           = Form(""),
 ):
+    get_current_user(request)
     """
     Parse an architecture document (text) or diagram (image) and return
     structured architecture fields ready to populate the configure form.
@@ -219,7 +232,7 @@ async def parse_architecture_endpoint(
     if not content.strip() and not image:
         raise HTTPException(400, "Provide either text content or an image file")
 
-    llm_client = LLMClient(llm_provider, llm_api_key)
+    llm_client = LLMClient(llm_provider, llm_api_key, azure_endpoint=azure_endpoint)
 
     if image:
         raw_bytes  = await image.read()
@@ -236,13 +249,14 @@ async def parse_architecture_endpoint(
 # POST /api/preview — generate personas + scenarios
 # ──────────────────────────────────────────────────────────────────────────
 @app.post("/api/preview")
-async def preview(req: PreviewRequest):
+async def preview(req: PreviewRequest, request: Request):
+    get_current_user(request)
     if not req.agent_description.strip():
         raise HTTPException(400, "agent_description is required")
     if not req.llm_api_key and not _env_key_set(req.llm_provider):
         raise HTTPException(400, f"API key required for {req.llm_provider}")
 
-    llm_client = LLMClient(req.llm_provider, req.llm_api_key)
+    llm_client = LLMClient(req.llm_provider, req.llm_api_key, azure_endpoint=req.azure_endpoint)
 
     from stages.s0_profile.document_parser import build_profile_from_config
     profile = build_profile_from_config(
@@ -294,11 +308,13 @@ async def preview(req: PreviewRequest):
 # ──────────────────────────────────────────────────────────────────────────
 @app.post("/api/run")
 async def run_tests(
+    request: Request,
     background_tasks: BackgroundTasks,
     config: str = Form(...),
     document: Optional[UploadFile] = File(None),
     ground_truth_file: Optional[UploadFile] = File(None),
 ):
+    user = get_current_user(request)
     import json, csv, io
     try:
         config_data = json.loads(config)
@@ -414,7 +430,8 @@ async def run_tests(
     # Fix 29: project_id comes from config (set by UI from dashboard [id]) or defaults to run_id
     project_id = run_config.project_id or run_id
 
-    # Fix 22: job store contains NO API keys — only status/progress/config summary
+    from datetime import datetime as _dt
+    # Job store contains NO API keys — only status/progress/config summary
     jobs[run_id] = {
         "status":        "queued",
         "progress":      0,
@@ -422,8 +439,12 @@ async def run_tests(
         "current_phase": "",
         "phase_results": {},
         "log_events":    [],
+        "eval_warnings": [],
         "error":         None,
         "results":       None,
+        "project_id":    project_id,
+        "user_email":    user["email"],
+        "timestamp":     _dt.utcnow().isoformat(),
         # Safe config summary (no credentials)
         "config_summary": {
             "endpoint_url":    run_config.endpoint_url,
@@ -440,6 +461,7 @@ async def run_tests(
         job_store=jobs,
         doc_text=doc_text,
         project_id=project_id,
+        user_email=user["email"],
     )
 
     return {"run_id": run_id, "project_id": project_id}
@@ -449,12 +471,16 @@ async def run_tests(
 # GET /api/job/{run_id}/status — poll job status
 # ──────────────────────────────────────────────────────────────────────────
 @app.get("/api/job/{run_id}/status")
-async def get_job_status(run_id: str):
+async def get_job_status(run_id: str, request: Request):
+    user = get_current_user(request)
     job = jobs.get(run_id)
     if not job:
-        # Fix 21: fall back to DB for runs that completed before last restart
+        # Fall back to DB for runs that completed before last restart
         db_row = _db.get_run(run_id)
         if db_row:
+            owner = db_row.get("user_email", "")
+            if owner and owner != user["email"]:
+                raise HTTPException(403, "Access denied: this run belongs to another user")
             return {
                 "run_id":        run_id,
                 "status":        db_row.get("status", "completed"),
@@ -463,9 +489,11 @@ async def get_job_status(run_id: str):
                 "current_phase": "",
                 "phase_results": {},
                 "log_events":    [],
+                "eval_warnings": [],
                 "error":         None,
             }
         raise HTTPException(404, "Job not found")
+    _check_job_ownership(job, user["email"])
     return {
         "run_id":        run_id,
         "status":        job["status"],
@@ -474,6 +502,7 @@ async def get_job_status(run_id: str):
         "current_phase": job["current_phase"],
         "phase_results": job["phase_results"],
         "log_events":    job.get("log_events", []),
+        "eval_warnings": job.get("eval_warnings", []),
         "error":         job["error"],
     }
 
@@ -482,15 +511,21 @@ async def get_job_status(run_id: str):
 # GET /api/job/{run_id}/results — fetch completed results
 # ──────────────────────────────────────────────────────────────────────────
 @app.get("/api/job/{run_id}/results")
-async def get_job_results(run_id: str):
+async def get_job_results(run_id: str, request: Request):
+    user = get_current_user(request)
     job = jobs.get(run_id)
     if not job:
-        # Fix 21: fall back to DB
+        # Fall back to DB
         db_row = _db.get_run(run_id)
-        if db_row and db_row.get("results"):
-            return db_row["results"]
+        if db_row:
+            owner = db_row.get("user_email", "")
+            if owner and owner != user["email"]:
+                raise HTTPException(403, "Access denied: this run belongs to another user")
+            if db_row.get("results"):
+                return db_row["results"]
         raise HTTPException(404, "Job not found")
-    if job["status"] == "running" or job["status"] == "queued":
+    _check_job_ownership(job, user["email"])
+    if job["status"] in ("running", "queued"):
         raise HTTPException(202, "Job still running")
     if job["status"] == "failed":
         raise HTTPException(500, job.get("error", "Pipeline failed"))
@@ -518,11 +553,42 @@ async def health():
 # GET /api/project/{project_id}/runs — Fix 28: run history for a project
 # ──────────────────────────────────────────────────────────────────────────
 @app.get("/api/project/{project_id}/runs")
-async def get_project_runs(project_id: str):
-    """Return all completed runs for a project, sorted newest-first."""
+async def get_project_runs(project_id: str, request: Request):
+    user = get_current_user(request)
+    """Return all runs for a project: DB rows + any in-memory runs not yet persisted."""
+    # Verify the project belongs to the requesting user
+    project = _db.get_project(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    if project.get("user_email") != user["email"]:
+        raise HTTPException(403, "Not your project")
     try:
-        runs = _db.get_runs_for_project(project_id)
-        return {"project_id": project_id, "runs": runs}
+        db_runs = _db.get_runs_for_project(project_id)
+        db_run_ids = {r["run_id"] for r in db_runs}
+
+        # Include in-memory runs not yet saved to DB (e.g. if save_run failed)
+        mem_runs = []
+        for rid, job in jobs.items():
+            if job.get("project_id") != project_id or rid in db_run_ids:
+                continue
+            # Skip runs that belong to a different user
+            if job.get("user_email") and job["user_email"] != user["email"]:
+                continue
+            results = job.get("results") or {}
+            mem_runs.append({
+                "run_id":           rid,
+                "project_id":       project_id,
+                "timestamp":        job.get("timestamp", ""),
+                "health_score":     results.get("health_score"),
+                "domain":           job.get("config_summary", {}).get("agent_domain", ""),
+                "application_type": job.get("config_summary", {}).get("application_type", ""),
+                "status":           job["status"],
+            })
+
+        all_runs = sorted(db_runs + mem_runs, key=lambda r: r.get("timestamp", ""), reverse=True)
+        return {"project_id": project_id, "runs": all_runs}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"DB error: {e}")
 
@@ -531,8 +597,20 @@ async def get_project_runs(project_id: str):
 # GET /api/runs/{run_id_a}/compare/{run_id_b} — Fix 28: regression diff
 # ──────────────────────────────────────────────────────────────────────────
 @app.get("/api/runs/{run_id_a}/compare/{run_id_b}")
-async def compare_runs(run_id_a: str, run_id_b: str):
+async def compare_runs(run_id_a: str, run_id_b: str, request: Request):
+    user = get_current_user(request)
     """Compare health scores and class pass-rates between two runs."""
+    # Ownership check — allow if user_email is absent (legacy rows pre-fix)
+    for rid in (run_id_a, run_id_b):
+        job = jobs.get(rid)
+        if job:
+            _check_job_ownership(job, user["email"])
+        else:
+            db_row = _db.get_run(rid)
+            if db_row:
+                owner = db_row.get("user_email", "")
+                if owner and owner != user["email"]:
+                    raise HTTPException(403, f"Access denied to run {rid}")
     try:
         diff = _db.compare_runs(run_id_a, run_id_b)
         if "error" in diff:
@@ -542,6 +620,70 @@ async def compare_runs(run_id_a: str, run_id_b: str):
         raise
     except Exception as e:
         raise HTTPException(500, f"Compare error: {e}")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Auth endpoints — login/logout handled by AWS Cognito on the frontend.
+# /api/auth/me validates the Cognito Bearer token and returns the caller's email.
+# ──────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    return get_current_user(request)
+
+
+# ── Project persistence endpoints ───────────────────────────────────────────
+
+class _ProjectBody(BaseModel):
+    project_id: str
+    name: str
+    endpoint: str
+    api_key: str = ""
+    document_text: str = ""
+    document_name: str = ""
+
+
+@app.post("/api/projects")
+async def create_project(body: _ProjectBody, request: Request):
+    user = get_current_user(request)
+    _db.save_project(
+        body.project_id, user["email"], body.name, body.endpoint,
+        body.api_key, body.document_text, body.document_name,
+    )
+    return {"ok": True}
+
+
+@app.get("/api/projects")
+async def list_projects(request: Request):
+    user = get_current_user(request)
+    projects = _db.get_projects_for_user(user["email"])
+    return {"projects": projects}
+
+
+@app.get("/api/projects/{project_id}")
+async def get_project(project_id: str, request: Request):
+    get_current_user(request)
+    project = _db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(project_id: str, request: Request):
+    user = get_current_user(request)
+    project = _db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.get("user_email") != user["email"]:
+        raise HTTPException(status_code=403, detail="Not your project")
+    _db.delete_project(project_id)
+    return {"ok": True}
 
 
 # ── Helper ─────────────────────────────────────────────────────────────────

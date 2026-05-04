@@ -272,8 +272,9 @@ class RunConfig(BaseModel):
     load_duration_seconds:  int  = 30
 
     # LLM
-    llm_provider: str = "Groq"
-    llm_api_key:  str = ""
+    llm_provider:   str = "Groq"
+    llm_api_key:    str = ""
+    azure_endpoint: str = ""   # required for Azure OpenAI — base URL e.g. https://my-resource.openai.azure.com/
 
     # Security
     selected_attacks:      List[str] = ["jailbreak", "prompt_injection", "pii_extraction", "toxicity", "encoding"]
@@ -573,6 +574,7 @@ class PreviewRequest(BaseModel):
     num_scenarios:     int = 5
     llm_provider:      str = "Groq"
     llm_api_key:       str = ""
+    azure_endpoint:    str = ""
 
 class ConnectTestRequest(BaseModel):
     endpoint_url:         str
@@ -587,3 +589,4 @@ class ParseDocumentRequest(BaseModel):
     document_text:   str
     llm_provider:    str = "Groq"
     llm_api_key:     str = ""
+    azure_endpoint:  str = ""

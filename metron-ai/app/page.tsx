@@ -1,26 +1,115 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { signIn, signOut, fetchAuthSession } from "aws-amplify/auth";
+
+console.log("[LoginPage] Component file loaded");
 
 export default function LoginPage() {
+  console.log("[LoginPage] Rendering login page component");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const router = useRouter();
 
-  const handleLogin = (e: React.FormEvent) => {
+  console.log("[LoginPage] useRouter hook initialized");
+
+  useEffect(() => {
+    const handleError = (event: ErrorEvent) => {
+      console.error("[LoginPage] Global error:", event.error);
+    };
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      console.error("[LoginPage] Unhandled rejection:", event.reason);
+    };
+
+    window.addEventListener("error", handleError);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+
+    return () => {
+      window.removeEventListener("error", handleError);
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+    };
+  }, []);
+
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError("");
-    setTimeout(() => {
+    try {
+      console.log("[Login] Starting sign-in for email:", email.trim());
+
+      // Clear any stale Amplify session before attempting fresh sign-in
+      try {
+        console.log("[Login] Clearing stale session...");
+        await signOut();
+        console.log("[Login] Stale session cleared");
+      } catch (err) {
+        console.log("[Login] No stale session to clear:", err);
+      }
+
+      console.log("[Login] Calling signIn...");
+      const output = await signIn({ username: email.trim(), password });
+      console.log("[Login] SignIn output:", {
+        isSignedIn: output.isSignedIn,
+        nextStep: output.nextStep,
+        fullOutput: JSON.stringify(output),
+      });
+
+      if (output.isSignedIn) {
+        console.log("[Login] Sign-in successful, waiting for token persistence...");
+
+        // Give Amplify time to persist tokens to localStorage (up to 2 seconds)
+        let tokensFound = false;
+        for (let i = 0; i < 20; i++) {
+          try {
+            const session = await fetchAuthSession();
+            if (session.tokens?.idToken) {
+              console.log("[Login] Tokens verified in fetchAuthSession:", {
+                email: session.tokens.idToken.payload?.email,
+                hasIdToken: true
+              });
+              tokensFound = true;
+              break;
+            }
+          } catch (e) {
+            console.log("[Login] Retry", i + 1, "- tokens not yet accessible via fetchAuthSession");
+          }
+          // Wait 100ms before retrying
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        if (!tokensFound) {
+          console.warn("[Login] Tokens not found after waiting; proceeding anyway (will be stored soon)");
+        }
+
+        // Set session cookie so the middleware (proxy.ts) allows /dashboard access
+        document.cookie = "metron_session=1; path=/; SameSite=Lax";
+
+        setLoading(false);
+        console.log("[Login] Current pathname BEFORE navigation:", window.location.pathname);
+        console.log("[Login] Proceeding to navigate to /dashboard...");
+
+        // Use window.location.href for hard navigation to ensure fresh page load with tokens
+        window.location.href = "/dashboard";
+      } else {
+        const msg = `Sign-in incomplete (${output.nextStep?.signInStep ?? "unknown step"}). Check your email for a confirmation code.`;
+        console.log("[Login] Sign-in incomplete:", msg);
+        setError(msg);
+        setLoading(false);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Invalid email or password";
+      console.error("[Login] Error during sign-in:", { msg, fullError: err });
+      setError(msg);
       setLoading(false);
-      window.location.href = "/dashboard";
-    }, 1500);
+    }
   };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[var(--color-background)]">
+    <div className="flex min-h-screen w-screen bg-[var(--color-background)]">
       {/* ─── Left Brand Panel ─────────────────────────────── */}
       <div className="hidden lg:flex lg:w-1/2 flex-col justify-between p-16 relative overflow-hidden bg-gradient-to-br from-[#001e2c] via-[#004c69] to-[#00668a]">
         <div className="absolute -top-32 -left-32 w-[500px] h-[500px] rounded-full bg-white/5 blur-3xl" />
@@ -123,9 +212,21 @@ export default function LoginPage() {
               </div>
             </div>
 
-            <div className="flex justify-end pt-1">
+            <div className="flex justify-between items-center pt-1">
+              <p className="text-xs text-[var(--color-on-surface-variant)] font-medium">
+                Don&apos;t have an account?{" "}
+                <a href="/register" className="text-[var(--color-primary)] font-bold hover:underline">
+                  Create one
+                </a>
+              </p>
               <a href="#" className="text-xs font-bold text-[var(--color-primary)] hover:text-[var(--color-primary-container)] transition-colors">Forgot password?</a>
             </div>
+
+            {error && (
+              <p className="text-sm font-semibold text-red-500 bg-red-50 px-4 py-3 rounded-xl">
+                {error}
+              </p>
+            )}
 
             <button
               type="submit"
@@ -147,7 +248,7 @@ export default function LoginPage() {
             <div className="h-px flex-1 bg-[var(--color-outline-variant)] opacity-30" />
           </div>
 
-          <button className="w-full py-4 rounded-xl border border-[var(--color-outline-variant)] border-opacity-40 flex items-center justify-center gap-3 text-sm font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-low)] transition-all">
+          <button type="button" className="w-full py-4 rounded-xl border border-[var(--color-outline-variant)] border-opacity-40 flex items-center justify-center gap-3 text-sm font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-low)] transition-all">
             <svg className="w-5 h-5" viewBox="0 0 24 24">
               <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
               <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
@@ -157,11 +258,6 @@ export default function LoginPage() {
             Google Workspace
           </button>
 
-          <footer className="pt-8 text-center">
-            <p className="text-xs text-[var(--color-on-surface-variant)] font-medium">
-              Don&apos;t have access? <span className="text-[var(--color-on-surface)] font-bold">Ask your Admin.</span>
-            </p>
-          </footer>
         </div>
       </div>
     </div>

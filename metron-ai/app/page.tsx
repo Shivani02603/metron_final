@@ -56,11 +56,7 @@ export default function LoginPage() {
       if (output.isSignedIn) {
         console.log("[Login] Sign-in successful, checking localStorage for tokens...");
         const storageKeys = Object.keys(localStorage);
-        console.log("[Login] localStorage keys:", storageKeys);
-        const amplifyKeys = storageKeys.filter(k => k.includes('amplify') || k.includes('cognito'));
-        console.log("[Login] Amplify-related storage:", amplifyKeys, {
-          values: amplifyKeys.map(k => ({ key: k, value: localStorage.getItem(k)?.substring(0, 50) }))
-        });
+        console.log("[Login] localStorage keys count:", storageKeys.length);
 
         // Verify session is accessible
         try {
@@ -74,49 +70,24 @@ export default function LoginPage() {
           console.error("[Login] Failed to fetch session after signIn:", e);
         }
 
-        console.log("[Login] About to call router.push('/dashboard')...");
-        console.log("[Login] router object:", {
-          basePath: (router as any).basePath,
-          pathname: (router as any).pathname,
-        });
         setLoading(false);
+        console.log("[Login] Tokens confirmed, attempting navigation to /dashboard...");
 
-        // Direct router.push without delay - Next.js App Router handles this synchronously
-        try {
-          console.log("[Login] Calling router.push('/dashboard')...");
-          const result = router.push("/dashboard");
-          console.log("[Login] ✓ router.push() returned:", {
-            type: typeof result,
-            isPromise: result instanceof Promise,
-            result: result,
-          });
+        // Use window.location.href directly since router.push() appears to be non-functional
+        console.log("[Login] Using window.location.href = '/dashboard'");
+        window.location.href = "/dashboard";
 
-          // Add verification in case navigation doesn't happen
-          let navigationCheckCount = 0;
-          const navigationCheckInterval = setInterval(() => {
-            navigationCheckCount++;
-            console.log(`[Login] Navigation check ${navigationCheckCount}:`, window.location.pathname);
-            if (navigationCheckCount > 5) {
-              clearInterval(navigationCheckInterval);
-              console.warn("[Login] Navigation appears stuck, using window.location.href fallback");
-              window.location.href = "/dashboard";
+        // Backup: if window.location.href doesn't work, try router.push after delay
+        setTimeout(() => {
+          if (window.location.pathname === "/") {
+            console.warn("[Login] window.location.href navigation failed, trying router.push as backup...");
+            try {
+              router.push("/dashboard");
+            } catch (err) {
+              console.error("[Login] router.push backup also failed:", err);
             }
-          }, 200);
-
-          // Clear interval after 2 seconds (assumes navigation happened)
-          setTimeout(() => {
-            clearInterval(navigationCheckInterval);
-            console.log("[Login] Navigation verification complete, URL is now:", window.location.href);
-          }, 2000);
-        } catch (err) {
-          console.error("[Login] ✗ Exception calling router.push():", {
-            message: err instanceof Error ? err.message : String(err),
-            stack: err instanceof Error ? err.stack : undefined,
-            error: err,
-          });
-          console.log("[Login] Using fallback: window.location.href");
-          window.location.href = "/dashboard";
-        }
+          }
+        }, 500);
       } else {
         const msg = `Sign-in incomplete (${output.nextStep?.signInStep ?? "unknown step"}). Check your email for a confirmation code.`;
         console.log("[Login] Sign-in incomplete:", msg);

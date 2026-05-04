@@ -4,13 +4,18 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { signIn, signOut, fetchAuthSession } from "aws-amplify/auth";
 
+console.log("[LoginPage] Component file loaded");
+
 export default function LoginPage() {
+  console.log("[LoginPage] Rendering login page component");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const router = useRouter();
+
+  console.log("[LoginPage] useRouter hook initialized");
 
   useEffect(() => {
     const handleError = (event: ErrorEvent) => {

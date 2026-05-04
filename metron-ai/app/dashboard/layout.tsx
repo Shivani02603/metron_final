@@ -47,12 +47,12 @@ export default function DashboardLayout({
         console.log("[DashboardLayout] No tokens on first attempt, waiting 300ms and retrying...");
         return new Promise<void>((resolve) => setTimeout(resolve, 300))
           .then(() => {
-            if (!isMounted) return;
+            if (!isMounted) return Promise.resolve(undefined);
             console.log("[DashboardLayout] Retrying fetchAuthSession...");
             return fetchAuthSession();
           })
           .then((s) => {
-            if (!isMounted) return;
+            if (!isMounted || !s) return;
             console.log("[DashboardLayout] Second fetchAuthSession result:", {
               hasTokens: !!s.tokens,
               tokenKeys: s.tokens ? Object.keys(s.tokens) : [],

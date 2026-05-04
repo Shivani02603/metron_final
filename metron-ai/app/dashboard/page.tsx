@@ -4,6 +4,8 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { authFetch } from "@/lib/api";
 
+console.log("[DashboardPage] Component file loaded at", new Date().toISOString());
+
 interface Project {
   id: string;
   name: string;

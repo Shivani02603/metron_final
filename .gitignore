@@ -86,3 +86,5 @@ build/
 .DS_Store
 *.swp
 *.swo
+# Added by code-review-graph
+.code-review-graph/

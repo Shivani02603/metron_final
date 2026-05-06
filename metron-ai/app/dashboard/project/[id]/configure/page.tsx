@@ -661,9 +661,9 @@ export default function ConfigurePage() {
             </label>
           </div>
           <div className="space-y-4">
-            <SliderField label="Performance Requests" min={5} max={200} value={perfRequests} onChange={setPerfRequests} />
-            <SliderField label="Load Test Users" min={1} max={200} value={loadUsers} onChange={setLoadUsers} />
-            <SliderField label="Load Duration (s)" min={10} max={300} value={loadDuration} onChange={setLoadDuration} />
+            <SliderField label="Performance Requests" min={5} max={1000} value={perfRequests} onChange={setPerfRequests} />
+            <SliderField label="Load Test Users" min={1} max={1000} value={loadUsers} onChange={setLoadUsers} />
+            <SliderField label="Load Duration (s)" min={10} max={1000} value={loadDuration} onChange={setLoadDuration} />
           </div>
         </div>
       </Section>

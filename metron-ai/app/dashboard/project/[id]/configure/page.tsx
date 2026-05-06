@@ -761,7 +761,7 @@ export default function ConfigurePage() {
             </div>
           ))}
         </div>
-        <SliderField label="Attack Prompts per Category" min={1} max={20} value={attacksPerCategory} onChange={setAttacksPerCategory} />
+        <SliderField label="Attack Prompts per Category" min={1} max={50} value={attacksPerCategory} onChange={setAttacksPerCategory} />
       </Section>
 
       {/* ── Quality Metrics ────────────────────────────────── */}

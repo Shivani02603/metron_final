@@ -642,8 +642,8 @@ export default function ConfigurePage() {
       <Section title="Test Parameters" icon="tune">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="space-y-4">
-            <SliderField label="Personas" min={1} max={50} value={numPersonas} onChange={setNumPersonas} />
-            <SliderField label="Scenarios" min={1} max={50} value={numScenarios} onChange={setNumScenarios} />
+            <SliderField label="Personas" min={1} max={100} value={numPersonas} onChange={setNumPersonas} />
+            <SliderField label="Scenarios" min={1} max={100} value={numScenarios} onChange={setNumScenarios} />
           </div>
           <div className="space-y-4">
             <SliderField label="Conversation Turns" min={1} max={15} value={convTurns} onChange={setConvTurns} />

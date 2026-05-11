@@ -32,7 +32,7 @@ from core.models import (
     Conversation, MetricResult, Persona, RunConfig,
 )
 from core.config import THRESHOLDS
-from core.deepeval_azure import make_deepeval_azure_model
+from core.deepeval_azure import make_deepeval_model
 
 # ── LLM Judge prompts ─────────────────────────────────────────────────────────
 
@@ -429,11 +429,15 @@ async def evaluate_functional(
     results: List[MetricResult] = []
 
     _configure_deepeval(config.llm_provider, config.llm_api_key, getattr(config, "azure_endpoint", "") or "")
-    deval_model = make_deepeval_azure_model()
+    deval_model = make_deepeval_model(
+        provider_name=config.llm_provider,
+        api_key=config.llm_api_key,
+        azure_endpoint=getattr(config, "azure_endpoint", "") or "",
+    )
     if deval_model is None:
-        print("[FunctionalEval] WARNING: Azure OpenAI not configured — DeepEval metrics "
-              "(hallucination, answer_relevancy, usefulness) will be skipped. "
-              "Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY to enable them.")
+        print(f"[FunctionalEval] WARNING: Could not initialise DeepEval model for provider "
+              f"'{config.llm_provider}' — DeepEval metrics (hallucination, answer_relevancy, "
+              f"usefulness) will be skipped. Check that the API key for this provider is set.")
 
     # Fix 3: always default criteria only (no domain criteria from quality_criteria)
     criteria_text  = _DEFAULT_CRITERIA_TEXT

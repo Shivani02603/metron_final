@@ -27,7 +27,7 @@ from core.models import (
     Conversation, MetricResult, Persona, RunConfig, TestClass,
 )
 from core.config import THRESHOLDS
-from core.deepeval_azure import make_deepeval_azure_model
+from core.deepeval_azure import make_deepeval_model
 
 
 # ── Escalation criterion filter ───────────────────────────────────────────────
@@ -202,10 +202,15 @@ async def evaluate_quality(
     from stages.s4_evaluation.functional import _set_azure_env
     _set_azure_env(config)
 
-    deval_model = make_deepeval_azure_model()
+    deval_model = make_deepeval_model(
+        provider_name=config.llm_provider,
+        api_key=config.llm_api_key,
+        azure_endpoint=getattr(config, "azure_endpoint", "") or "",
+    )
     if deval_model is None:
-        print("[QualityEval] WARNING: Azure OpenAI not configured — GEval quality criteria "
-              "will be skipped. Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY to enable.")
+        print(f"[QualityEval] WARNING: Could not initialise DeepEval model for provider "
+              f"'{config.llm_provider}' — GEval quality criteria will be skipped. "
+              f"Check that the API key for this provider is set.")
 
     persona_map  = {p.persona_id: p for p in personas}
     results: List[MetricResult] = []

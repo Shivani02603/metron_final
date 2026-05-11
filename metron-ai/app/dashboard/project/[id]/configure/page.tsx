@@ -399,7 +399,8 @@ export default function ConfigurePage() {
               <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-50 mt-1">Ignored when Request Template is set.</p>
             </Field>
             <Field label="Response Field (dot-notation)">
-              <input className="input-field" placeholder="response  or  result.artifacts.0.parts.0.text" value={responseField} onChange={(e) => setResponseField(e.target.value)} />
+              <input className="input-field" placeholder="response  or  result.artifacts.0.parts.0.text|result.status.message.parts.0.text" value={responseField} onChange={(e) => setResponseField(e.target.value)} />
+              <p className="text-[10px] text-[var(--color-on-surface-variant)] opacity-50 mt-1">Use | to specify fallback paths (e.g. for A2A agents that alternate between completed/in-progress states).</p>
             </Field>
             <Field label="Request Template (optional — for complex APIs)">
               <textarea

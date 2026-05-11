@@ -33,7 +33,7 @@ from core.models import (
     Conversation, MetricResult, Persona, RunConfig, TestClass,
 )
 from core.config import THRESHOLDS
-from core.deepeval_azure import make_deepeval_azure_model
+from core.deepeval_azure import make_deepeval_model
 
 # ── Refusal keyword list (Fix 8: expanded to cover creative / longer-form refusals) ──
 REFUSAL_KEYWORDS = [
@@ -583,10 +583,16 @@ async def evaluate_security(
     loop        = asyncio.get_running_loop()   # Fix 20
     _CPU_TIMEOUT   = 60   # DeBERTa / Detoxify — CPU-bound, 60s is more than enough
     _AZURE_TIMEOUT = 120  # Bias metric — Azure OpenAI call
-    deval_model = make_deepeval_azure_model()
+    deval_model = make_deepeval_model(
+        provider_name=config.llm_provider if config else "Azure OpenAI",
+        api_key=config.llm_api_key if config else "",
+        azure_endpoint=getattr(config, "azure_endpoint", "") or "" if config else "",
+    )
     if deval_model is None:
-        print("[SecurityEval] WARNING: Azure OpenAI not configured — BiasMetric "
-              "will be skipped. Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY to enable.")
+        _pname = config.llm_provider if config else "unknown"
+        print(f"[SecurityEval] WARNING: Could not initialise DeepEval model for provider "
+              f"'{_pname}' — BiasMetric will be skipped. "
+              f"Check that the API key for this provider is set.")
 
     # ── 1. Passive safety monitoring on ALL conversations (Fix 12) ─────────────
     # superset = "security" for security test convs; "safety_passive" for all others

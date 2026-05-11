@@ -425,7 +425,7 @@ async def evaluate_rag(
 
     Returns list of MetricResult objects tagged superset="rag".
     """
-    from core.deepeval_azure import make_deepeval_azure_model  # type: ignore
+    from core.deepeval_azure import make_deepeval_model  # type: ignore
     from stages.s4_evaluation.functional import _set_azure_env
 
     _set_azure_env(config)
@@ -445,7 +445,11 @@ async def evaluate_rag(
 
     # ── Answer Relevancy — all conversations ──────────────────────────────────
     try:
-        deval_model = make_deepeval_azure_model()
+        deval_model = make_deepeval_model(
+            provider_name=config.llm_provider,
+            api_key=config.llm_api_key,
+            azure_endpoint=getattr(config, "azure_endpoint", "") or "",
+        )
     except Exception as e:
         print(f"[RAG/DeepEval] Could not init model: {e}")
         deval_model = None

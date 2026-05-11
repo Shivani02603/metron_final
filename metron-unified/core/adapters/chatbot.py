@@ -97,7 +97,8 @@ class ChatbotAdapter:
                     # Extraction errors go into the error field so evaluators
                     # never receive internal sentinel strings as real responses.
                     if text.startswith(("[Field ", "[Index ", "[Empty")):
-                        return AdapterResponse("", latency, error=text)
+                        raw_hint = json.dumps(data, ensure_ascii=False)[:500]
+                        return AdapterResponse("", latency, error=f"{text}\nActual response: {raw_hint}")
                     return AdapterResponse(text, latency)
         except aiohttp.ClientConnectorError as e:
             latency = (time.monotonic() - start) * 1000
@@ -114,6 +115,19 @@ class ChatbotAdapter:
 
     @staticmethod
     def _extract(data: dict, field_path: str) -> str:
+        # Support fallback paths separated by | (e.g. for A2A protocol where
+        # completed responses have artifacts but in-progress use status.message)
+        paths = [p.strip() for p in field_path.split("|") if p.strip()]
+        last_error = f"[Field '' not found]"
+        for path in paths:
+            result = ChatbotAdapter._extract_single(data, path)
+            if not result.startswith(("[Field ", "[Index ", "[Empty")):
+                return result
+            last_error = result
+        return last_error
+
+    @staticmethod
+    def _extract_single(data: dict, field_path: str) -> str:
         parts = field_path.split(".")
         result: object = data
         for part in parts:

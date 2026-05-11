@@ -8,7 +8,10 @@
       "Bash(node -e \"const p=require\\('./package.json'\\); console.log\\('Next:', p.dependencies.next\\); console.log\\('React:', p.dependencies.react\\);\")",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Lakshya\\\\Desktop\\\\YASH\\\\metron_final\" -Force)",
       "Bash(Select-Object Name, FullName)",
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "WebSearch",
+      "mcp__code-review-graph__semantic_search_nodes_tool",
+      "mcp__code-review-graph__get_architecture_overview_tool"
     ]
   }
 }

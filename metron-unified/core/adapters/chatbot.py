@@ -21,6 +21,7 @@ class AdapterResponse:
     retrieved_context: Optional[List[str]] = None
     agent_trace:       Optional[List[Dict]] = None
     error:             Optional[str] = None
+    raw_data:          Optional[Dict] = None
 
     @property
     def ok(self) -> bool:
@@ -94,11 +95,14 @@ class ChatbotAdapter:
                         return AdapterResponse("", latency, error=f"HTTP {resp.status}")
                     data = await resp.json(content_type=None)
                     text = self._trim_response(self._extract(data, self.response_field))
-                    # Extraction errors go into the error field so evaluators
-                    # never receive internal sentinel strings as real responses.
-                    if text.startswith(("[Field ", "[Index ", "[Empty")):
-                        return AdapterResponse("", latency, error=text)
-                    return AdapterResponse(text, latency)
+                    # If configured path fails, try A2A protocol auto-detection before giving up.
+                    if text.startswith(("[Field ", "[Index ", "[Empty", "[No item")):
+                        a2a_text = self._try_extract_a2a(data)
+                        if a2a_text:
+                            text = self._trim_response(a2a_text)
+                        else:
+                            return AdapterResponse("", latency, error=text, raw_data=data)
+                    return AdapterResponse(text, latency, raw_data=data)
         except aiohttp.ClientConnectorError as e:
             latency = (time.monotonic() - start) * 1000
             return AdapterResponse("", latency, error=f"Connection refused: {e}")
@@ -110,6 +114,12 @@ class ChatbotAdapter:
         resp = await self.send("Hello, this is a connectivity test.")
         if resp.ok:
             return True, f"Connected. Latency: {resp.latency_ms:.0f}ms"
+        # A2A protocol: endpoint returns {"result": {"status": {"state": "..."}}} even
+        # when artifacts aren't present (e.g. state="input-required" for a greeting).
+        # The endpoint is live — extraction failing on the test message is expected.
+        if resp.raw_data and "result" in resp.raw_data:
+            state = (resp.raw_data["result"].get("status") or {}).get("state", "responded")
+            return True, f"Connected (A2A, state={state}). Latency: {resp.latency_ms:.0f}ms"
         return False, resp.error or "Unknown error"
 
     @staticmethod
@@ -122,6 +132,39 @@ class ChatbotAdapter:
             elif isinstance(result, list) and part.isdigit():
                 idx = int(part)
                 result = result[idx] if 0 <= idx < len(result) else "[Index OOB]"
+            elif isinstance(result, list) and "[" in part and "=" in part:
+                # Array filter syntax: field[key=value] — selects first matching item.
+                # e.g. "parts[type=text]" picks the first part where type == "text".
+                filter_expr = part.split("[", 1)[1].rstrip("]")
+                filter_key, filter_val = filter_expr.split("=", 1)
+                matched = next(
+                    (item for item in result if isinstance(item, dict) and item.get(filter_key) == filter_val),
+                    None,
+                )
+                if matched is not None:
+                    result = matched
+                else:
+                    return f"[No item with {filter_key}={filter_val} in array]"
             else:
                 return f"[Field '{part}' not found]"
         return str(result) if result is not None else "[Empty response]"
+
+    @staticmethod
+    def _try_extract_a2a(data: dict) -> str:
+        """Auto-extract text from an A2A protocol response.
+
+        Walks result.artifacts[].parts[] and returns the first part
+        where type == 'text', regardless of position in the array.
+        This handles mixed-type parts arrays (text + auth, etc.).
+        """
+        try:
+            artifacts = (data.get("result") or {}).get("artifacts") or []
+            for artifact in artifacts:
+                for part in artifact.get("parts") or []:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text = part.get("text", "")
+                        if text:
+                            return text
+        except Exception:
+            pass
+        return ""

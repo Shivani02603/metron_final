@@ -122,9 +122,13 @@ async def generate_security_prompts(
     for atk in pool:
         by_category.setdefault(atk["category"], []).append(atk)
 
+    # Cap at 2 adapt calls per category to prevent rate-limiter queue explosion.
+    # With 30–50 adversarial personas × 6 categories, uncapped this creates
+    # 900+ sequential LLM calls that take 40+ minutes at Groq's 30 RPM.
+    _adapt_cap = min(attacks_per_category, 2)
     selected: List[Dict] = []
     for cat, attacks in by_category.items():
-        selected.extend(attacks[:attacks_per_category])
+        selected.extend(attacks[:_adapt_cap])
 
     sem = asyncio.Semaphore(5)
 
@@ -248,9 +252,13 @@ def _extract_playbook_prompts(persona: Persona) -> list[GeneratedPrompt]:
     for step in persona.playbook_steps[:5]:
         _add(step.get("content", ""), step.get("expected_safe_response", ""))
 
-    # Conversation trajectory — include payload_delivery and exfiltration turns
+    # Conversation trajectory — include high-value attack turns
+    # "boundary_testing"/"escalation" are the current names; old names kept for DB-stored personas
     for turn in persona.attack_trajectory:
-        if turn.get("intent", "") in ("payload_delivery", "exfiltration", "exfiltration_or_persistence", "context_manipulation"):
+        if turn.get("intent", "") in (
+            "payload_delivery", "exfiltration", "exfiltration_or_persistence", "context_manipulation",
+            "boundary_testing", "escalation",
+        ):
             _add(turn.get("prompt", ""))
 
     # Entry points not already added (diverse variants from example_prompts)
@@ -575,12 +583,26 @@ async def generate_all_security(
         async with outer_sem:
             return await generate_edge_case_security(p, profile, llm_client, tech_profile=tech_profile)
 
-    # 1. Adversarial personas
-    adv_batches  = await asyncio.gather(*[_bounded_adversarial(p) for p in adversarial])
+    # 1. Adversarial personas — 3-minute ceiling so a hung API call can't freeze the pipeline
+    try:
+        adv_batches = await asyncio.wait_for(
+            asyncio.gather(*[_bounded_adversarial(p) for p in adversarial]),
+            timeout=180,
+        )
+    except asyncio.TimeoutError:
+        print("[SecurityGen] WARNING: adversarial adapt timed out after 180s — using available results")
+        adv_batches = []
     adapted_prompts = [prompt for batch in adv_batches for prompt in batch]
 
     # 2. Edge-case personas (Fix 14)
-    edge_batches = await asyncio.gather(*[_bounded_edge(p) for p in edge_case])
+    try:
+        edge_batches = await asyncio.wait_for(
+            asyncio.gather(*[_bounded_edge(p) for p in edge_case]),
+            timeout=60,
+        )
+    except asyncio.TimeoutError:
+        print("[SecurityGen] WARNING: edge-case adapt timed out after 60s — using available results")
+        edge_batches = []
     edge_prompts = [prompt for batch in edge_batches for prompt in batch]
 
     # 3. Golden dataset prompts (AdvBench + HarmBench)

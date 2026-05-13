@@ -23,7 +23,8 @@ from .config import (
     get_model, resolve_api_key, should_optimize_tokens, get_token_budget,
 )
 
-litellm.set_verbose = False
+litellm.set_verbose = True
+litellm._turn_on_debug()
 
 
 # ── Rate Limiter ───────────────────────────────────────────────────────────
@@ -105,26 +106,7 @@ class LLMClient:
 
         primary_model = get_model(self.provider_name, task)
 
-        # Build cross-provider fallback chain: static FALLBACK_CHAIN first,
-        # then one balanced model from each other configured provider whose
-        # API key is available in the environment.
-        # Only include a fallback model if its provider actually has a usable key —
-        # avoids cascading "Invalid API Key" errors when the user picked a specific
-        # provider and no other keys are set in the environment.
-        static_fallbacks = [
-            m for m in FALLBACK_CHAIN
-            if m != primary_model and self._has_key_for_model(m)
-        ]
-        cross_provider = []
-        for pname, pinfo in LLM_PROVIDERS.items():
-            if pname == self.provider_name:
-                continue
-            env_key = pinfo.get("env_key", "")
-            if env_key and os.environ.get(env_key):
-                cross_provider.append(pinfo["models"]["balanced"])
-        candidates = [primary_model] + static_fallbacks + [
-            m for m in cross_provider if m not in static_fallbacks and m != primary_model
-        ]
+        candidates = [primary_model]
 
         now = time.monotonic()
         last_error: Exception = RuntimeError("No models available")
@@ -144,7 +126,7 @@ class LLMClient:
                 except litellm.exceptions.RateLimitError as e:
                     last_error = e
                     msg = str(e).lower()
-                    if "quota" in msg or "resource_exhausted" in msg or "generaterequeststsperday" in msg.replace(" ", ""):
+                    if "quota" in msg or "resource_exhausted" in msg or "too_many_requests" in msg or "generaterequeststsperday" in msg.replace(" ", ""):
                         self._exhausted[model] = time.monotonic()
                         break   # skip retries, try next model
                     wait = self._parse_retry_after(str(e))
@@ -161,6 +143,12 @@ class LLMClient:
                         self._exhausted[model] = time.monotonic()
                         break
                     raise   # real bad request — propagate
+                except asyncio.TimeoutError as e:
+                    last_error = RuntimeError(f"LLM call timed out after 45s (model={model})")
+                    if attempt < 2:
+                        await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
+                    else:
+                        break
                 except Exception as e:
                     last_error = e
                     if attempt < 2:
@@ -242,7 +230,7 @@ class LLMClient:
         elif prefix == "gemini":
             kwargs["api_key"] = self.api_key if "gemini" in self.provider_name.lower() else os.environ.get("GEMINI_API_KEY", "")
 
-        response = await litellm.acompletion(**kwargs)
+        response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=45)
         return response.choices[0].message.content or ""
 
     @staticmethod

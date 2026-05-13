@@ -57,15 +57,21 @@ from stages.s8_rca.prompt_classifier import classify_prompt_failures
 
 # ── Progress helpers ───────────────────────────────────────────────────────
 
+_MAX_LOG_EVENTS = 300   # sliding window — keeps feed responsive with 100+ personas
+
 def _log(job_store: Dict, run_id: str, event_type: str, content: Dict):
     """Append a rich log event to the job's event stream for the live feed UI."""
     if run_id not in job_store:
         return
-    job_store[run_id].setdefault("log_events", []).append({
+    events = job_store[run_id].setdefault("log_events", [])
+    events.append({
         "type": event_type,
         "ts": datetime.utcnow().strftime("%H:%M:%S"),
         "content": content,
     })
+    # Rolling cap — drop oldest events so poll payload stays manageable
+    if len(events) > _MAX_LOG_EVENTS:
+        job_store[run_id]["log_events"] = events[-_MAX_LOG_EVENTS:]
 
 
 def _update(job_store: Dict, run_id: str, progress: int, message: str, phase: str = "", phase_data: Optional[Dict] = None):
@@ -184,11 +190,14 @@ async def run_pipeline(
         # 2a: Functional prompts — always LLM-generated, grounded in rag_text for RAG mode.
         # Ground truth Q&A pairs are handled separately in Stream 2 (after Stage 3).
         rag_text = config.rag_text if config.is_rag else ""
+        _log(job_store, run_id, "phase_progress", {"phase": "test_gen", "step": "functional", "message": "Generating functional test prompts…"})
         func_prompts = await generate_all_functional(
             personas, profile, llm_client,
             rag_text=rag_text,
             max_prompts=config.num_scenarios or 0,   # Fix 35: wire UI num_scenarios cap
         )
+        _update(job_store, run_id, 21, f"Generated {len(func_prompts)} functional prompts, generating security tests…", "test_gen")
+        _log(job_store, run_id, "phase_progress", {"phase": "test_gen", "step": "security", "message": f"Functional done ({len(func_prompts)} prompts). Generating security/adversarial tests…"})
 
         # 2b: Security prompts (adversarial personas only) + technical probes
         sec_prompts = await generate_all_security(
@@ -198,6 +207,8 @@ async def run_pipeline(
             attack_vectors=attack_vectors,
             tech_profile=tech_profile,
         )
+        _update(job_store, run_id, 23, f"Generated {len(sec_prompts)} security prompts, generating quality criteria…", "test_gen")
+        _log(job_store, run_id, "phase_progress", {"phase": "test_gen", "step": "quality", "message": f"Security done ({len(sec_prompts)} prompts). Generating quality criteria…"})
 
         # 2c: Quality criteria
         quality_criteria = await generate_quality_criteria(profile, llm_client)
@@ -247,8 +258,8 @@ async def run_pipeline(
             _log(job_store, run_id, "conversation", {
                 "persona_name": conv.persona_name,
                 "test_class": phase,
-                "query": last_turn.query if last_turn else "",
-                "response": last_turn.response if last_turn else "",
+                "query":    (last_turn.query    or "")[:400] if last_turn else "",
+                "response": (last_turn.response or "")[:500] if last_turn else "",
                 "latency_ms": round(conv.total_latency_ms),
                 "num_turns": len(conv.turns),
                 "done": done,

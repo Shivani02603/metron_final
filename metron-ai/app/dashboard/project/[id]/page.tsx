@@ -44,7 +44,16 @@ export default function ProjectLanding() {
           return;
         }
         setProject(proj);
-        setRuns(runsData.runs || []);
+        setRuns(
+          (runsData.runs || []).map((run: Run) => {
+            const saved = sessionStorage.getItem(`run_health_${run.run_id}`);
+            if (saved !== null) {
+              const h = parseFloat(saved);
+              if (!isNaN(h)) return { ...run, health_score: h };
+            }
+            return run;
+          })
+        );
 
         // Re-populate sessionStorage so configure/builder pages work
         sessionStorage.setItem(

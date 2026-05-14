@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
+import { useState, useEffect, Suspense, useCallback } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { authFetch } from "@/lib/api";
 
@@ -62,6 +62,9 @@ interface TestResult {
   failure_taxonomy_label?: string;
   failure_reason?: string;
   details: Record<string, unknown>;
+  manually_passed?: boolean;
+  original_score?: number;
+  original_passed?: boolean;
 }
 
 interface PhaseSummary {
@@ -154,6 +157,124 @@ interface FullResults {
   report_html?: string;
 }
 
+// ── Domain weights (mirrors backend config.py DOMAIN_WEIGHTS) ──────────────────
+const DOMAIN_WEIGHTS: Record<string, Record<string, number>> = {
+  finance:          { functional: 0.35, security: 0.40, quality: 0.10, performance: 0.10, load: 0.05 },
+  banking:          { functional: 0.35, security: 0.40, quality: 0.10, performance: 0.10, load: 0.05 },
+  medical:          { functional: 0.35, security: 0.45, quality: 0.10, performance: 0.08, load: 0.02 },
+  healthcare:       { functional: 0.35, security: 0.45, quality: 0.10, performance: 0.08, load: 0.02 },
+  legal:            { functional: 0.35, security: 0.40, quality: 0.15, performance: 0.07, load: 0.03 },
+  travel:           { functional: 0.35, security: 0.15, quality: 0.10, performance: 0.25, load: 0.15 },
+  ecommerce:        { functional: 0.35, security: 0.20, quality: 0.10, performance: 0.20, load: 0.15 },
+  retail:           { functional: 0.35, security: 0.20, quality: 0.10, performance: 0.20, load: 0.15 },
+  hr:               { functional: 0.35, security: 0.35, quality: 0.15, performance: 0.10, load: 0.05 },
+  human_resources:  { functional: 0.35, security: 0.35, quality: 0.15, performance: 0.10, load: 0.05 },
+  education:        { functional: 0.40, security: 0.15, quality: 0.30, performance: 0.10, load: 0.05 },
+  support:          { functional: 0.40, security: 0.15, quality: 0.15, performance: 0.20, load: 0.10 },
+  customer_support: { functional: 0.40, security: 0.15, quality: 0.15, performance: 0.20, load: 0.10 },
+  email:            { functional: 0.45, security: 0.15, quality: 0.25, performance: 0.10, load: 0.05 },
+  government:       { functional: 0.30, security: 0.45, quality: 0.15, performance: 0.07, load: 0.03 },
+  _default:         { functional: 0.40, security: 0.30, quality: 0.10, performance: 0.15, load: 0.05 },
+};
+
+function getWeights(domain: string) {
+  return DOMAIN_WEIGHTS[domain?.toLowerCase()] ?? DOMAIN_WEIGHTS._default;
+}
+
+function applyManualPass(
+  prev: FullResults,
+  phase: "functional" | "security" | "quality" | "rag",
+  testId: string,
+): FullResults {
+  const phaseData = prev[phase];
+  if (!phaseData) return prev;
+
+  const newResults = phaseData.results.map(r =>
+    r.test_id === testId ? {
+      ...r,
+      score: 1.0,
+      passed: true,
+      manually_passed: true,
+      original_score: r.manually_passed ? r.original_score : r.score,
+      original_passed: r.manually_passed ? r.original_passed : r.passed,
+    } : r
+  );
+  const newPassed   = newResults.filter(r => r.passed).length;
+  const newFailed   = newResults.length - newPassed;
+  const newAvgScore = newResults.length > 0 ? newResults.reduce((s, r) => s + r.score, 0) / newResults.length : 0;
+  const newPassRate = newResults.length > 0 ? Math.round((newPassed / newResults.length) * 100) : 0;
+  const newPhaseData: PhaseSummary = { ...phaseData, results: newResults, passed: newPassed, failed: newFailed, avg_score: newAvgScore, pass_rate: newPassRate };
+
+  const weights      = getWeights(prev.domain);
+  const totalWeight  = Object.values(weights).reduce((a, b) => a + b, 0);
+  const funcAvg      = phase === "functional" ? newAvgScore : prev.functional?.avg_score ?? 0;
+  const secAvg       = phase === "security"   ? newAvgScore : prev.security?.avg_score  ?? 0;
+  const qualAvg      = phase === "quality"    ? newAvgScore : prev.quality?.avg_score   ?? 0;
+  const oldContrib   = (prev.functional?.avg_score ?? 0) * (weights.functional ?? 0)
+                     + (prev.security?.avg_score   ?? 0) * (weights.security   ?? 0)
+                     + (prev.quality?.avg_score    ?? 0) * (weights.quality    ?? 0);
+  const perfLoad     = prev.health_score * totalWeight - oldContrib;
+  const newHealth    = Math.min(1, Math.max(0,
+    (funcAvg * (weights.functional ?? 0) + secAvg * (weights.security ?? 0) + qualAvg * (weights.quality ?? 0) + perfLoad) / totalWeight
+  ));
+
+  const allResults = [
+    ...(phase === "functional" ? newResults : prev.functional?.results ?? []),
+    ...(phase === "security"   ? newResults : prev.security?.results   ?? []),
+    ...(phase === "quality"    ? newResults : prev.quality?.results    ?? []),
+    ...(phase === "rag"        ? newResults : prev.rag?.results        ?? []),
+  ];
+
+  return { ...prev, [phase]: newPhaseData, health_score: newHealth, passed: newHealth >= 0.50, total_passed: allResults.filter(r => r.passed).length };
+}
+
+function applyManualRevert(
+  prev: FullResults,
+  phase: "functional" | "security" | "quality" | "rag",
+  testId: string,
+): FullResults {
+  const phaseData = prev[phase];
+  if (!phaseData) return prev;
+
+  const newResults = phaseData.results.map(r =>
+    r.test_id === testId ? {
+      ...r,
+      score: r.original_score ?? r.score,
+      passed: r.original_passed ?? r.passed,
+      manually_passed: false,
+      original_score: undefined,
+      original_passed: undefined,
+    } : r
+  );
+  const newPassed   = newResults.filter(r => r.passed).length;
+  const newFailed   = newResults.length - newPassed;
+  const newAvgScore = newResults.length > 0 ? newResults.reduce((s, r) => s + r.score, 0) / newResults.length : 0;
+  const newPassRate = newResults.length > 0 ? Math.round((newPassed / newResults.length) * 100) : 0;
+  const newPhaseData: PhaseSummary = { ...phaseData, results: newResults, passed: newPassed, failed: newFailed, avg_score: newAvgScore, pass_rate: newPassRate };
+
+  const weights     = getWeights(prev.domain);
+  const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0);
+  const funcAvg     = phase === "functional" ? newAvgScore : prev.functional?.avg_score ?? 0;
+  const secAvg      = phase === "security"   ? newAvgScore : prev.security?.avg_score  ?? 0;
+  const qualAvg     = phase === "quality"    ? newAvgScore : prev.quality?.avg_score   ?? 0;
+  const oldContrib  = (prev.functional?.avg_score ?? 0) * (weights.functional ?? 0)
+                    + (prev.security?.avg_score   ?? 0) * (weights.security   ?? 0)
+                    + (prev.quality?.avg_score    ?? 0) * (weights.quality    ?? 0);
+  const perfLoad    = prev.health_score * totalWeight - oldContrib;
+  const newHealth   = Math.min(1, Math.max(0,
+    (funcAvg * (weights.functional ?? 0) + secAvg * (weights.security ?? 0) + qualAvg * (weights.quality ?? 0) + perfLoad) / totalWeight
+  ));
+
+  const allResults = [
+    ...(phase === "functional" ? newResults : prev.functional?.results ?? []),
+    ...(phase === "security"   ? newResults : prev.security?.results   ?? []),
+    ...(phase === "quality"    ? newResults : prev.quality?.results    ?? []),
+    ...(phase === "rag"        ? newResults : prev.rag?.results        ?? []),
+  ];
+
+  return { ...prev, [phase]: newPhaseData, health_score: newHealth, passed: newHealth >= 0.50, total_passed: allResults.filter(r => r.passed).length };
+}
+
 // ─────────────────────────────── Component ────────────────────────────────────
 export default function ResultsPage() {
   return (
@@ -194,8 +315,30 @@ function ResultsContent() {
         return r.json();
       })
       .then((data) => {
-        // Attach run_id into results
-        setResults({ ...data, run_id: runId });
+        const base = { ...data, run_id: runId } as FullResults;
+        // Re-apply any manually passed tests saved from a previous visit
+        type SavedEntry = { phase: "functional" | "security" | "quality" | "rag"; originalScore: number; originalPassed: boolean };
+        const saved = JSON.parse(sessionStorage.getItem(`manual_passes_${runId}`) || "{}") as Record<string, SavedEntry>;
+        const withPasses = Object.entries(saved).reduce(
+          (acc, [testId, entry]) => {
+            const phaseData = acc[entry.phase];
+            if (!phaseData) return acc;
+            const preSeeded: FullResults = {
+              ...acc,
+              [entry.phase]: {
+                ...phaseData,
+                results: phaseData.results.map(r =>
+                  r.test_id === testId
+                    ? { ...r, original_score: entry.originalScore, original_passed: entry.originalPassed }
+                    : r
+                ),
+              },
+            };
+            return applyManualPass(preSeeded, entry.phase, testId);
+          },
+          base,
+        );
+        setResults(withPasses);
         setLoading(false);
       })
       .catch((e) => {
@@ -203,6 +346,35 @@ function ResultsContent() {
         setLoading(false);
       });
   }, [projectId]);
+
+  const handleManualPass = useCallback((phase: "functional" | "security" | "quality" | "rag", testId: string) => {
+    setResults(prev => {
+      if (!prev) return prev;
+      const key = `manual_passes_${prev.run_id}`;
+      const saved = JSON.parse(sessionStorage.getItem(key) || "{}");
+      const test = prev[phase]?.results.find(r => r.test_id === testId);
+      if (test && !test.manually_passed) {
+        saved[testId] = { phase, originalScore: test.score, originalPassed: test.passed };
+        sessionStorage.setItem(key, JSON.stringify(saved));
+      }
+      const next = applyManualPass(prev, phase, testId);
+      sessionStorage.setItem(`run_health_${prev.run_id}`, String(next.health_score));
+      return next;
+    });
+  }, []);
+
+  const handleManualRevert = useCallback((phase: "functional" | "security" | "quality" | "rag", testId: string) => {
+    setResults(prev => {
+      if (!prev) return prev;
+      const key = `manual_passes_${prev.run_id}`;
+      const saved = JSON.parse(sessionStorage.getItem(key) || "{}");
+      delete saved[testId];
+      sessionStorage.setItem(key, JSON.stringify(saved));
+      const next = applyManualRevert(prev, phase, testId);
+      sessionStorage.setItem(`run_health_${prev.run_id}`, String(next.health_score));
+      return next;
+    });
+  }, []);
 
   const downloadJSON = () => {
     if (!results) return;
@@ -432,16 +604,16 @@ ${rcaSection}`;
         {/* Tab content */}
         <div className="p-6">
           {/* ── Tab 0: Functional ── */}
-          {activeTab === 0 && <FunctionalTab data={results.functional} personaBreakdown={results.persona_breakdown} />}
+          {activeTab === 0 && <FunctionalTab data={results.functional} personaBreakdown={results.persona_breakdown} onManualPass={(id) => handleManualPass("functional", id)} onManualRevert={(id) => handleManualRevert("functional", id)} />}
 
           {/* ── Tab 1: Security ── */}
-          {activeTab === 1 && <SecurityTab data={results.security} />}
+          {activeTab === 1 && <SecurityTab data={results.security} onManualPass={(id) => handleManualPass("security", id)} onManualRevert={(id) => handleManualRevert("security", id)} />}
 
           {/* ── Tab 2: Quality ── */}
-          {activeTab === 2 && <QualityTab data={results.quality} />}
+          {activeTab === 2 && <QualityTab data={results.quality} onManualPass={(id) => handleManualPass("quality", id)} onManualRevert={(id) => handleManualRevert("quality", id)} />}
 
           {/* ── Tab 3: RAG (only present in RAG mode) ── */}
-          {results.rag && activeTab === 3 && <RAGTab data={results.rag} />}
+          {results.rag && activeTab === 3 && <RAGTab data={results.rag} onManualPass={(id) => handleManualPass("rag", id)} onManualRevert={(id) => handleManualRevert("rag", id)} />}
 
           {/* ── Performance / Load / RCA / Export — indices shift with optional RAG tab ── */}
           {(() => {
@@ -516,9 +688,13 @@ ${rcaSection}`;
 function FunctionalTab({
   data,
   personaBreakdown,
+  onManualPass,
+  onManualRevert,
 }: {
   data: PhaseSummary;
   personaBreakdown: FullResults["persona_breakdown"];
+  onManualPass?: (id: string) => void;
+  onManualRevert?: (id: string) => void;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   if (!data?.results) return <EmptyState />;
@@ -569,7 +745,7 @@ function FunctionalTab({
             {expanded.has(cat) && (
               <div className="divide-y divide-[var(--color-outline-variant)]">
                 {results.map((r) => (
-                  <TestResultRow key={r.test_id} result={r} />
+                  <TestResultRow key={r.test_id} result={r} onManualPass={onManualPass} onManualRevert={onManualRevert} />
                 ))}
               </div>
             )}
@@ -622,7 +798,7 @@ function FunctionalTab({
 }
 
 // ─────────────────────── Security Tab ─────────────────────────────────────
-function SecurityTab({ data }: { data: PhaseSummary }) {
+function SecurityTab({ data, onManualPass, onManualRevert }: { data: PhaseSummary; onManualPass?: (id: string) => void; onManualRevert?: (id: string) => void }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   if (!data?.results) return <EmptyState />;
 
@@ -699,6 +875,18 @@ function SecurityTab({ data }: { data: PhaseSummary }) {
                       <span className={`text-[10px] font-black ml-auto ${r.passed ? "text-secondary" : "text-error"}`}>
                         {(r.score * 100).toFixed(0)}%
                       </span>
+                      {(onManualPass || onManualRevert) && (
+                        <button
+                          onClick={() => { r.manually_passed ? onManualRevert?.(r.test_id) : onManualPass?.(r.test_id); }}
+                          className={`text-[10px] px-2 py-0.5 rounded-full font-bold border transition-colors ${
+                            r.manually_passed
+                              ? "bg-amber-500/10 text-amber-600 border-amber-500/30 hover:bg-amber-500/20"
+                              : "border-[var(--color-outline)] text-[var(--color-on-surface-variant)] hover:bg-secondary/10 hover:text-secondary hover:border-secondary/30"
+                          }`}
+                        >
+                          {r.manually_passed ? "Revert" : "Pass"}
+                        </button>
+                      )}
                     </div>
                     {r.reasoning && (
                       <p className="text-xs text-[var(--color-on-surface-variant)] pl-8 leading-relaxed">{r.reasoning}</p>
@@ -735,7 +923,7 @@ function SecurityTab({ data }: { data: PhaseSummary }) {
 }
 
 // ─────────────────────── Quality Tab ──────────────────────────────────────
-function QualityTab({ data }: { data: PhaseSummary }) {
+function QualityTab({ data, onManualPass, onManualRevert }: { data: PhaseSummary; onManualPass?: (id: string) => void; onManualRevert?: (id: string) => void }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   if (!data?.results) return <EmptyState />;
 
@@ -754,9 +942,9 @@ function QualityTab({ data }: { data: PhaseSummary }) {
 
       {data.results.map((r) => (
         <div key={r.test_id} className="border border-[var(--color-outline-variant)] rounded-xl overflow-hidden">
-          <button
+          <div
             onClick={() => toggle(r.test_id)}
-            className="w-full flex items-center justify-between p-4 hover:bg-[var(--color-surface-container-low)] transition-colors"
+            className="w-full flex items-center justify-between p-4 hover:bg-[var(--color-surface-container-low)] transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3">
               <span className={`material-symbols-outlined text-base ${r.passed ? "text-secondary" : "text-error"}`}>
@@ -768,11 +956,23 @@ function QualityTab({ data }: { data: PhaseSummary }) {
               <span className={`text-xs font-black ${r.passed ? "text-secondary" : "text-error"}`}>
                 {(r.score * 100).toFixed(0)}%
               </span>
+              {(onManualPass || onManualRevert) && (
+                <button
+                  onClick={e => { e.stopPropagation(); r.manually_passed ? onManualRevert?.(r.test_id) : onManualPass?.(r.test_id); }}
+                  className={`text-[10px] px-2 py-0.5 rounded-full font-bold border transition-colors ${
+                    r.manually_passed
+                      ? "bg-amber-500/10 text-amber-600 border-amber-500/30 hover:bg-amber-500/20"
+                      : "border-[var(--color-outline)] text-[var(--color-on-surface-variant)] hover:bg-secondary/10 hover:text-secondary hover:border-secondary/30"
+                  }`}
+                >
+                  {r.manually_passed ? "Revert" : "Pass"}
+                </button>
+              )}
               <span className="material-symbols-outlined text-base text-[var(--color-on-surface-variant)]">
                 {expanded.has(r.test_id) ? "expand_less" : "expand_more"}
               </span>
             </div>
-          </button>
+          </div>
           {expanded.has(r.test_id) && (
             <div className="px-4 pb-4 space-y-3 border-t border-[var(--color-outline-variant)]">
               <ConversationBlock input={r.input_text} output={r.output_text} inputLabel="Question" outputLabel="Response" />
@@ -824,7 +1024,7 @@ function QualityTab({ data }: { data: PhaseSummary }) {
 }
 
 // ─────────────────────── RAG Tab ──────────────────────────────────────────
-function RAGTab({ data }: { data: PhaseSummary }) {
+function RAGTab({ data, onManualPass, onManualRevert }: { data: PhaseSummary; onManualPass?: (id: string) => void; onManualRevert?: (id: string) => void }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   if (!data?.results) return <EmptyState />;
 
@@ -877,9 +1077,9 @@ function RAGTab({ data }: { data: PhaseSummary }) {
       <div className="space-y-3">
         {data.results.map((r) => (
           <div key={r.test_id} className="border border-[var(--color-outline-variant)] rounded-xl overflow-hidden">
-            <button
+            <div
               onClick={() => toggle(r.test_id)}
-              className="w-full flex items-center justify-between p-4 hover:bg-[var(--color-surface-container-low)] transition-colors"
+              className="w-full flex items-center justify-between p-4 hover:bg-[var(--color-surface-container-low)] transition-colors cursor-pointer"
             >
               <div className="flex items-center gap-3 min-w-0">
                 <span className={`material-symbols-outlined text-base flex-shrink-0 ${r.passed ? "text-secondary" : "text-error"}`}>
@@ -892,11 +1092,23 @@ function RAGTab({ data }: { data: PhaseSummary }) {
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
                 <span className={`text-xs font-black ${r.passed ? "text-secondary" : "text-error"}`}>{(r.score * 100).toFixed(0)}%</span>
+                {(onManualPass || onManualRevert) && (
+                  <button
+                    onClick={e => { e.stopPropagation(); r.manually_passed ? onManualRevert?.(r.test_id) : onManualPass?.(r.test_id); }}
+                    className={`text-[10px] px-2 py-0.5 rounded-full font-bold border transition-colors ${
+                      r.manually_passed
+                        ? "bg-amber-500/10 text-amber-600 border-amber-500/30 hover:bg-amber-500/20"
+                        : "border-[var(--color-outline)] text-[var(--color-on-surface-variant)] hover:bg-secondary/10 hover:text-secondary hover:border-secondary/30"
+                    }`}
+                  >
+                    {r.manually_passed ? "Revert" : "Pass"}
+                  </button>
+                )}
                 <span className="material-symbols-outlined text-base text-[var(--color-on-surface-variant)]">
                   {expanded.has(r.test_id) ? "expand_less" : "expand_more"}
                 </span>
               </div>
-            </button>
+            </div>
             {expanded.has(r.test_id) && (
               <div className="px-4 pb-4 space-y-3 border-t border-[var(--color-outline-variant)]">
                 <ConversationBlock input={r.input_text} output={r.output_text} inputLabel="Question" outputLabel="RAG Answer" />
@@ -1150,11 +1362,11 @@ function LoadTab({ data }: { data: LoadMetrics }) {
 }
 
 // ─────────────────────── Shared mini-components ────────────────────────────
-function TestResultRow({ result }: { result: TestResult }) {
+function TestResultRow({ result, onManualPass, onManualRevert }: { result: TestResult; onManualPass?: (id: string) => void; onManualRevert?: (id: string) => void }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="border-t border-[var(--color-outline-variant)] first:border-0">
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between p-3 hover:bg-[var(--color-surface-container-low)] transition-colors text-left gap-3">
+      <div onClick={() => setOpen(!open)} className="w-full flex items-center justify-between p-3 hover:bg-[var(--color-surface-container-low)] transition-colors text-left gap-3 cursor-pointer">
         <div className="flex items-center gap-3 min-w-0">
           <span className={`material-symbols-outlined text-sm flex-shrink-0 ${result.passed ? "text-secondary" : "text-error"}`}>
             {result.passed ? "check_circle" : "cancel"}
@@ -1164,9 +1376,21 @@ function TestResultRow({ result }: { result: TestResult }) {
         <div className="flex items-center gap-2 flex-shrink-0">
           <span className="text-xs text-[var(--color-on-surface-variant)] opacity-60">{result.latency_ms.toFixed(0)}ms</span>
           <span className={`text-xs font-black ${result.passed ? "text-secondary" : "text-error"}`}>{(result.score * 100).toFixed(0)}%</span>
+          {(onManualPass || onManualRevert) && (
+            <button
+              onClick={e => { e.stopPropagation(); result.manually_passed ? onManualRevert?.(result.test_id) : onManualPass?.(result.test_id); }}
+              className={`text-[10px] px-2 py-0.5 rounded-full font-bold border transition-colors ${
+                result.manually_passed
+                  ? "bg-amber-500/10 text-amber-600 border-amber-500/30 hover:bg-amber-500/20"
+                  : "border-[var(--color-outline)] text-[var(--color-on-surface-variant)] hover:bg-secondary/10 hover:text-secondary hover:border-secondary/30"
+              }`}
+            >
+              {result.manually_passed ? "Revert" : "Pass"}
+            </button>
+          )}
           <span className="material-symbols-outlined text-sm text-[var(--color-on-surface-variant)]">{open ? "expand_less" : "expand_more"}</span>
         </div>
-      </button>
+      </div>
       {open && (
         <div className="px-4 pb-3 space-y-2">
           <ConversationBlock input={result.input_text} output={result.output_text} />
